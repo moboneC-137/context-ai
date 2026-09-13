@@ -23,11 +23,16 @@ enum AX {
 
     /// Reads an `AXUIElement`-typed attribute.
     static func element(_ element: AXUIElement, _ name: String) -> AXUIElement? {
+        elementWithStatus(element, name).0
+    }
+
+    /// Like `element(_:_:)` but also returns the raw `AXError`, for diagnostics.
+    static func elementWithStatus(_ element: AXUIElement, _ name: String) -> (AXUIElement?, AXError) {
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
-        guard status == .success, let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        guard status == .success, let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return (nil, status) }
         // Safe: the type ID was checked above.
-        return unsafeDowncast(value, to: AXUIElement.self)
+        return (unsafeDowncast(value, to: AXUIElement.self), status)
     }
 
     /// Reads an array-of-elements attribute (e.g. `AXChildren`).
@@ -42,6 +47,14 @@ enum AX {
 
     static func string(_ element: AXUIElement, _ name: String) -> String? {
         attribute(element, name, as: String.self)
+    }
+
+    /// Like `string(_:_:)` but also returns the raw `AXError`; a value of another type reads as `.success` + `nil`.
+    static func stringWithStatus(_ element: AXUIElement, _ name: String) -> (String?, AXError) {
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+        guard status == .success, let value else { return (nil, status) }
+        return (value as? String, status)
     }
 
     static func bool(_ element: AXUIElement, _ name: String) -> Bool? {

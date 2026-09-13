@@ -38,6 +38,19 @@ struct CaptureResultTests {
         #expect(!line.contains("\"bounds\""))
     }
 
+    @Test("Tier 1 diagnostics are encoded only when present")
+    func tier1Diagnostics() throws {
+        let miss = TierAttempt(tier: 1, ok: false, ms: 0.8, error: "no-selected-text-attr", axError: -25212, role: "AXWebArea")
+        let line = CaptureResult(app: "com.apple.Safari", attempts: [miss], totalMs: 1, error: "exhausted").jsonLine()
+        #expect(line.contains("\"axError\":-25212"))
+        #expect(line.contains("\"role\":\"AXWebArea\""))
+        let decoded = try JSONDecoder.iso.decode(CaptureResult.self, from: Data(line.utf8))
+        #expect(decoded.attempts[0].axError == -25212 && decoded.attempts[0].role == "AXWebArea")
+
+        let hit = CaptureResult(app: "a", attempts: [TierAttempt(tier: 1, ok: true, ms: 1)], totalMs: 1).jsonLine()
+        #expect(!hit.contains("axError") && !hit.contains("role"))
+    }
+
     @Test("truncation keeps textLength and appends an ellipsis")
     func truncation() {
         let long = String(repeating: "x", count: 412)

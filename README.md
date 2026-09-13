@@ -56,26 +56,44 @@ by dragging (more than 3 pt) or by double/triple-clicking a word or paragraph. E
 produces one JSON line on stdout (and in `matrix.jsonl`). Plain clicks and typing produce nothing and
 never touch the clipboard. Do a handful of selections per app so the percentiles mean something.
 
-| App | Where to select | Expected |
+| App | Where to select | Measured on 2026-09-13 (macOS 26, warm; p95 = max of 9) |
 | --- | --- | --- |
-| Safari | Any web page | Tier 1, `boundsSource: "range"` |
-| Notes | A note body | Tier 1 |
-| Preview | A PDF | Tier 1 |
-| Chrome | Any web page | Tier 1 after `AXEnhancedUserInterface`, possibly with retries |
-| Slack or VS Code | Message / editor | Tier 1 or 2, slower — Electron |
-| Terminal | Shell output | Tier 3 via ⌘C, or `error: "no-selection"` — expected-fail control |
-| IntelliJ | Editor | Tier 3 or `error` — expected-fail control |
+| Safari | Any web page | **Tier 2** every time, ~30 ms; Tier 1 never (`AXWebArea` answers `noValue` for `AXSelectedText`) |
+| Notes | A note body | Tier 1, 6–24 ms, `boundsSource: "range"` |
+| Preview | A PDF | Tier 1, 1–27 ms; bounds fall to the mouse (PDFKit has no `AXSelectedTextRange`) |
+| Chrome | Any web page | Tier 1 warm (6–46 ms) / Tier 2 cold (26–50 ms); bounds fall to the mouse |
+| VS Code (or Slack) | Editor | Tier 1, 1–11 ms; Electron. Double-clicks reach Tier 2 (~30 ms) |
+| Terminal | Shell output | Tier 1, 1–38 ms, `range` bounds — not the expected-fail control the brief assumed |
+| IntelliJ IDEA 2026 | Editor | Tier 1, 3–23 ms, `range` bounds (JetBrains now exposes AX text) |
+| IDLE (Tk) | Editor | Tier 2 or 3 only, 180–260 ms — the genuine zero-AX case |
 
-Also try a password field (Safari login form, or `sudo` in Terminal) and look at `secureInput` in the
-line: that answers whether secure input swallows the synthetic events (addendum B1).
+Every warm hit is under the brief's 300 ms bar; hit-rate on real selections was 100% in all eight apps.
+The full record, including what went wrong, is in
+`_bmad-output/implementation-artifacts/capture-matrix-results.md`.
+
+### Support tiers (measured)
+
+| Tier | Meaning | Apps, as measured on this machine |
+| --- | --- | --- |
+| 1 | AX-native selected text, ≤ 40 ms warm, real bounds | Notes, Terminal, IntelliJ; VS Code and Chrome (warm) with approximate or no bounds |
+| 2 | Clipboard via `Edit > Copy`, 30–60 ms, menu flash, no bounds | Safari, Chrome (cold) |
+| 3 | Synthetic ⌘C only, 180–260 ms, clipboard race guarded | Tk apps (IDLE) |
+| Unsupported / unknown | — | Qt (not exercisable through AX); the rest of the brief's zero-coverage list is untested |
+
+Also try a password field (Safari login form) and look at `secureInput` in the line. Measured: Safari's
+password field refuses both clipboard tiers (nothing leaks), and with Terminal's Secure Keyboard Entry on
+the synthetic ⌘C is still delivered — secure input is a signal for the app to honour, not a guard.
 
 Two things to keep in mind while gathering data:
 
 - A double or triple click fires the capture on the **second** click, so the logged text is the word
   selected at that moment. Use a drag for paragraph-sized text.
 - Drags that are not text selections (moving a window, dragging a scrollbar) still pass the gesture gate.
-  In native apps the disabled `Edit > Copy` gate turns them into cheap `no-selection` lines; in Electron
-  apps `Edit > Copy` is always enabled, so they count as full attempts and burn the Tier 2/3 timeouts.
+  In AppKit text apps (Notes, Terminal) the disabled `Edit > Copy` gate turns them into cheap
+  `no-selection` lines. In Chrome, VS Code, IntelliJ, Tk apps and Preview `Edit > Copy` is *always*
+  enabled, so they run the clipboard tiers (~200–400 ms). VS Code and IntelliJ then copy the **whole
+  current line** when nothing is selected, which the chain reports as a Tier 2 hit — a false positive
+  you should expect in the data.
 
 Press **Ctrl-C** when done. If a capture is mid-flight the tool finishes it first (so the clipboard is
 restored), then prints the summary to stderr.
@@ -84,7 +102,8 @@ Useful variants:
 
 ```sh
 .build/release/capture-spike --tiers 1               # AX only; never touches the clipboard
-.build/release/capture-spike --no-enhanced-ax        # measure Chrome/Electron without the AX hint + retries
+.build/release/capture-spike --no-enhanced-ax        # measure Chrome/Electron without the AXEnhancedUserInterface hint
+.build/release/capture-spike --tier1-retries 3       # re-enable the 3 × 150 ms Chromium retry loop (measured: net loss)
 .build/release/capture-spike --max-text 0            # log the full selected text
 .build/release/capture-spike --once                  # one capture of the focused app, then exit (0 = got text, 1 = not)
 ```
@@ -107,14 +126,18 @@ One line per gesture, keys sorted:
 | `app` | Bundle identifier of the frontmost app. |
 | `tier` | Winning tier (1, 2, 3) or `null` when nothing produced text. |
 | `text`, `textLength` | Captured text (truncated to `--max-text`, default 200) and its full length. |
-| `bounds`, `boundsSource` | Selection rect in `NSScreen` coordinates (bottom-left origin); `range` → `AXBoundsForRange`, `frame` → `AXFrame` of the focused element, `mouse` → pointer location, zero size. Zero and off-screen (y ≈ −9800) AX rects are rejected, never logged. |
-| `attempts` | One entry per tier that ran: its own elapsed ms, `ok`, and an `error` (`empty`, `no-focused-element`, `no-selection`, `no-copy-menu-item`, `timeout`, `no-text`, …). `retries` counts extra Tier 1 reads on Chromium/Electron. |
+| `bounds`, `boundsSource` | Selection rect in `NSScreen` coordinates (bottom-left origin); `range` → `AXBoundsForRange`, `frame` → `AXFrame` of the focused element, `mouse` → pointer location, zero size. Zero, off-screen (y ≈ −9800) and larger-than-a-display rects are rejected; a `frame` is only used when it covers ≤ 25% of its display and contains the pointer, because WebKit, PDFKit, Chromium and Tk answer with the whole document or window. |
+| `attempts` | One entry per tier that ran: its own elapsed ms, `ok`, and an `error` (`empty`, `no-focused-element`, `no-selected-text-attr`, `no-selection`, `no-copy-menu-item`, `timeout`, `no-text`, …). `retries` counts extra Tier 1 reads on Chromium/Electron. Tier 1 failures add `axError` (raw `AXError`, e.g. −25212 `kAXErrorNoValue`) and `role` (the focused element's `AXRole`). |
 | `totalMs`, `boundsMs` | Whole chain including bounds; bounds chain alone. |
 | `secureInput` | `IsSecureEventInputEnabled()` at capture time. |
 | `error` | `no-selection` (Edit > Copy was disabled, clipboard tiers skipped), `exhausted` (every enabled tier failed), or a chain-level failure. |
 
 Tier 2 and Tier 3 snapshot every pasteboard item and type before acting and restore them afterwards,
-success or failure. Tier 3 only counts as a hit when `changeCount` advanced within 150 ms.
+success or failure. Tier 3 only counts as a hit when `changeCount` advanced within 150 ms. After either
+tier the pasteboard is watched for one more second: a Copy that lands late (Preview renders the page
+before copying; IntelliJ writes twice) is reverted — but only if no key or mouse button was pressed since
+the tier finished, and, when the tier captured text, only if the late write is that same text. Your own
+⌘C or Edit > Copy always wins. The summary reports how many late copies were reverted.
 
 The Ctrl-C summary, per app:
 
@@ -132,9 +155,17 @@ session prints `no captures`.
 
 ## Known limitations
 
-- Tier 2/3 wait 150 ms for `changeCount` to advance. A Copy that lands after that window is reported as
-  a `timeout`, and the late write can leave the selection on the clipboard (the restore has already run
-  or was skipped because nothing had changed yet).
+- Tier 2/3 wait 150 ms for `changeCount` to advance; a Copy that lands later is reported as a `timeout`
+  and reverted by the one-second watch described above. A clipboard write with no local input inside
+  that second — Universal Clipboard from another device, `pbcopy` from a script — is indistinguishable
+  from a late copy and is reverted too.
+- The `Edit > Copy` gate only detects "nothing selected" in AppKit text apps. Chrome, VS Code, IntelliJ,
+  Tk apps and Preview keep Copy enabled, and VS Code / IntelliJ copy the current line when nothing is
+  selected, so a non-selection gesture there yields a false Tier 2 hit of that line.
+- Safari never hits Tier 1: WebKit does not answer `AXSelectedText` on the web area. It exposes the
+  selection through `AXSelectedTextMarkerRange` / `AXStringForTextMarkerRange` /
+  `AXBoundsForTextMarkerRange` instead; that path is not implemented in the spike (Tier 2 captures Safari
+  in ~30 ms) and is noted as follow-up work.
 - Tier 3 posts virtual key 8, which is ⌘C only on QWERTY-family layouts.
 - Keep the clipboard light during a run (no huge images or file promises): every Tier 2/3 attempt
   snapshots and restores all pasteboard data, and that cost lands in the tier's latency.

@@ -12,11 +12,12 @@ struct Arguments {
     var outPath: String?
     var tiers: [Int] = [1, 2, 3]
     var enhancedAX = true
+    var tier1Retries = 0
     var maxText = 200
     var help = false
 
     static let usage = """
-    usage: capture-spike [--once] [--out FILE] [--tiers 1,2,3] [--no-enhanced-ax] [--max-text N] [--help]
+    usage: capture-spike [--once] [--out FILE] [--tiers 1,2,3] [--no-enhanced-ax] [--tier1-retries N] [--max-text N] [--help]
 
     Headless probe for cross-app selected-text capture. Listens for selection gestures (drag > 3 pt or
     double/triple-click) and, on each mouseUp, runs Tier 1 (AX kAXSelectedText) → Tier 2 (AX press on
@@ -26,7 +27,9 @@ struct Arguments {
       --once             Run the chain once on the currently focused app, print one line, exit 0 (1 if no text).
       --out FILE         Also append every JSON line to FILE.
       --tiers 1,2,3      Which tiers to run; they always run in ascending order 1 → 2 → 3 (default: 1,2,3).
-      --no-enhanced-ax   Do not set AXEnhancedUserInterface / retry Tier 1 on Chromium & Electron apps.
+      --no-enhanced-ax   Do not set AXEnhancedUserInterface on Chromium & Electron apps (also disables retries).
+      --tier1-retries N  Extra Tier 1 reads, 150 ms apart, after a failure in Chromium & Electron apps (default 0;
+                         the B5 matrix measured 3 as a net loss).
       --max-text N       Truncate logged text to N characters (default 200; 0 = unlimited).
       --help             Show this text.
 
@@ -49,6 +52,11 @@ struct Arguments {
                     return .failure(UsageError(message: "--tiers needs a comma-separated subset of 1,2,3"))
                 }
                 parsed.tiers = tiers
+            case "--tier1-retries":
+                guard let value = iterator.next(), let n = Int(value), n >= 0 else {
+                    return .failure(UsageError(message: "--tier1-retries needs a non-negative integer"))
+                }
+                parsed.tier1Retries = n
             case "--max-text":
                 guard let value = iterator.next(), let n = Int(value), n >= 0 else {
                     return .failure(UsageError(message: "--max-text needs a non-negative integer"))
@@ -62,7 +70,7 @@ struct Arguments {
     }
 
     var captureOptions: CaptureOptions {
-        CaptureOptions(tiers: tiers, enhancedAX: enhancedAX)
+        CaptureOptions(tiers: tiers, enhancedAX: enhancedAX, tier1Retries: tier1Retries)
     }
 }
 

@@ -52,6 +52,33 @@ struct BoundsTests {
         #expect(outcome.bounds.w == 0 && outcome.bounds.h == 0)
     }
 
+    @Test("container-sized AXFrame fallbacks are implausible; small frames around the pointer are fine")
+    func framePlausibility() {
+        let mouse = CGPoint(x: 700, y: 400)
+        // Safari's whole web document / Chrome's whole window: rejected even though they contain the pointer.
+        let document = Bounds(x: 40, y: -877, w: 1200, h: 1542)
+        let window = Bounds(x: 0, y: 0, w: 1280, h: 712)
+        #expect(AXRect.isPlausibleSelection(document, screens: screens, mouse: mouse, fromFrame: true) == false)
+        #expect(AXRect.isPlausibleSelection(window, screens: screens, mouse: mouse, fromFrame: true) == false)
+        // VS Code's focused-line element: small and under the pointer.
+        let line = Bounds(x: 172, y: 390, w: 1063, h: 24)
+        #expect(AXRect.isPlausibleSelection(line, screens: screens, mouse: mouse, fromFrame: true) == true)
+        // The same line element when the pointer is elsewhere on screen: not where the selection is.
+        #expect(AXRect.isPlausibleSelection(line, screens: screens, mouse: CGPoint(x: 700, y: 100), fromFrame: true) == false)
+        // Tolerance: a pointer 3 pt outside still counts (a drag can end just past the edge).
+        #expect(AXRect.isPlausibleSelection(line, screens: screens, mouse: CGPoint(x: 700, y: 417), fromFrame: true) == true)
+    }
+
+    @Test("AXBoundsForRange rects only have to fit on a display; large selections and far pointers are accepted")
+    func rangePlausibility() {
+        let mouse = CGPoint(x: 10, y: 10)
+        let twentyLines = Bounds(x: 537, y: 155, w: 780, h: 458)
+        #expect(AXRect.isPlausibleSelection(twentyLines, screens: screens, mouse: mouse, fromFrame: false) == true)
+        let tallerThanScreen = Bounds(x: 40, y: -877, w: 1200, h: 1542)
+        #expect(AXRect.isPlausibleSelection(tallerThanScreen, screens: screens, mouse: mouse, fromFrame: false) == false)
+        #expect(AXRect.isPlausibleSelection(Bounds(x: 5000, y: 5000, w: 10, h: 10), screens: screens, mouse: mouse, fromFrame: false) == false)
+    }
+
     @Test("no screens means no bounds")
     func noScreens() {
         #expect(AXRect.flipAndValidate(CGRect(x: 1, y: 1, width: 1, height: 1), screens: []) == nil)

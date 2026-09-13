@@ -33,9 +33,20 @@ struct ArgumentsTests {
         #expect(parsed.enhancedAX == true)
         #expect(parsed.maxText == 200)
         #expect(parsed.outPath == nil)
+        #expect(parsed.tier1Retries == 0)
+        #expect(parsed.captureOptions.tier1Retries == 0)
         #expect(try parse("--once").get().once == true)
         #expect(try parse("--help").get().help == true)
         #expect(try parse("-h").get().help == true)
+    }
+
+    @Test("--tier1-retries re-enables the Chromium retry loop for measurement")
+    func tier1Retries() throws {
+        let parsed = try parse("--tier1-retries", "3").get()
+        #expect(parsed.tier1Retries == 3)
+        #expect(parsed.captureOptions.tier1Retries == 3)
+        #expect(failureMessage(parse("--tier1-retries", "-1")) == "--tier1-retries needs a non-negative integer")
+        #expect(failureMessage(parse("--tier1-retries")) != nil)
     }
 
     @Test("bad values and unknown flags fail")

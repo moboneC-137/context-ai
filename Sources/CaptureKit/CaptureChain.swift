@@ -6,27 +6,33 @@ import Carbon.HIToolbox
 public struct CaptureOptions: Sendable, Equatable {
     /// Tiers to run; they always run in ascending order (1 → 2 → 3). Anything outside 1...3 is ignored.
     public var tiers: [Int]
-    /// Set `AXEnhancedUserInterface` on Chromium/Electron apps and retry Tier 1 on any failure.
+    /// Set `AXEnhancedUserInterface` on Chromium/Electron apps (and allow Tier 1 retries there).
     public var enhancedAX: Bool
-    /// How many extra Tier 1 reads to make on an empty result (Chromium/Electron only).
+    /// How many extra Tier 1 reads to make after a failure (Chromium/Electron only, and only with `enhancedAX`).
+    /// The B5 matrix measured the retry loop as a net loss — Tier 2 resolves the same cases in ~30 ms — so the
+    /// default is 0; `--tier1-retries` re-enables it for measurement.
     public var tier1Retries: Int
     /// Pause between Tier 1 retries.
     public var tier1RetryDelay: Duration
     /// Longest wait for `changeCount` to advance in Tiers 2 and 3.
     public var clipboardTimeout: Duration
+    /// How long after a clipboard tier the pasteboard is watched for a late copy (see `PasteboardGuard`).
+    public var clipboardGrace: Duration
 
     public init(
         tiers: [Int] = [1, 2, 3],
         enhancedAX: Bool = true,
-        tier1Retries: Int = 3,
+        tier1Retries: Int = 0,
         tier1RetryDelay: Duration = .milliseconds(150),
-        clipboardTimeout: Duration = .milliseconds(150)
+        clipboardTimeout: Duration = .milliseconds(150),
+        clipboardGrace: Duration = .seconds(1)
     ) {
         self.tiers = tiers
         self.enhancedAX = enhancedAX
         self.tier1Retries = tier1Retries
         self.tier1RetryDelay = tier1RetryDelay
         self.clipboardTimeout = clipboardTimeout
+        self.clipboardGrace = clipboardGrace
     }
 
     /// Parses `"1,2,3"`-style lists. Returns `nil` for anything that is not a comma-separated subset of 1...3.
@@ -46,6 +52,14 @@ struct TargetApp: Equatable, Sendable {
     var pid: pid_t
 }
 
+/// Result of reading `AXFocusedUIElement`: the element (if any) and the raw `AXError` of the read.
+struct FocusedLookup {
+    var element: AXUIElement?
+    var status: AXError
+
+    static var none: FocusedLookup { FocusedLookup(element: nil, status: .noValue) }
+}
+
 /// Seam between the chain's policy (order, gate, retries, timing) and the live AX / pasteboard operations,
 /// so the policy can be unit-tested with scripted outcomes. Defaults to the real implementations.
 struct CaptureChainHooks {
@@ -54,16 +68,18 @@ struct CaptureChainHooks {
     var isChromium: @MainActor (pid_t) -> Bool
     /// Sets `AXEnhancedUserInterface` on the app; returns whether the AX call succeeded.
     var setEnhancedAX: @MainActor (pid_t, Bool) -> Bool
-    var focusedElement: @MainActor (pid_t) -> AXUIElement?
-    var tier1: @MainActor (AXUIElement?) -> TierOutcome
+    /// The focused element and the `AXError` of the lookup (kept for the Tier 1 diagnostics).
+    var focusedElement: @MainActor (pid_t) -> FocusedLookup
+    var tier1: @MainActor (FocusedLookup) -> TierOutcome
     var findCopyItem: @MainActor (pid_t) -> AXUIElement?
     var copyItemEnabled: @MainActor (AXUIElement) -> Bool?
-    var tier2: @MainActor (AXUIElement, Duration) async -> TierOutcome
-    var tier3: @MainActor (Duration) async -> TierOutcome
+    /// Clipboard tiers: (element, timeout, grace) / (timeout, grace).
+    var tier2: @MainActor (AXUIElement, Duration, Duration) async -> TierOutcome
+    var tier3: @MainActor (Duration, Duration) async -> TierOutcome
     var locate: @MainActor (AXUIElement?) -> BoundsChain.Outcome
 
     @MainActor
-    static func live(pasteboard: NSPasteboard) -> CaptureChainHooks {
+    static func live(pasteboard: NSPasteboard, lateCopyGuard: PasteboardGuard) -> CaptureChainHooks {
         CaptureChainHooks(
             secureInput: { IsSecureEventInputEnabled() },
             frontmostApp: {
@@ -79,12 +95,19 @@ struct CaptureChainHooks {
             setEnhancedAX: { pid, on in
                 AX.set(AX.application(pid: pid), "AXEnhancedUserInterface", to: on ? kCFBooleanTrue : kCFBooleanFalse)
             },
-            focusedElement: { pid in AX.element(AX.application(pid: pid), kAXFocusedUIElementAttribute) },
+            focusedElement: { pid in
+                let (element, status) = AX.elementWithStatus(AX.application(pid: pid), kAXFocusedUIElementAttribute)
+                return FocusedLookup(element: element, status: status)
+            },
             tier1: { Tiers.tier1(focused: $0) },
             findCopyItem: { pid in Tiers.findCopyMenuItem(app: AX.application(pid: pid)) },
             copyItemEnabled: { Tiers.copyItemEnabled($0) },
-            tier2: { item, timeout in await Tiers.tier2(copyItem: item, pasteboard: pasteboard, timeout: timeout) },
-            tier3: { timeout in await Tiers.tier3(pasteboard: pasteboard, timeout: timeout) },
+            tier2: { item, timeout, grace in
+                await Tiers.tier2(copyItem: item, pasteboard: pasteboard, lateCopyGuard: lateCopyGuard, timeout: timeout, grace: grace)
+            },
+            tier3: { timeout, grace in
+                await Tiers.tier3(pasteboard: pasteboard, lateCopyGuard: lateCopyGuard, timeout: timeout, grace: grace)
+            },
             locate: { BoundsChain.locate(focused: $0) }
         )
     }
@@ -99,13 +122,23 @@ public final class CaptureChain {
     private var copyItemCache: [pid_t: AXUIElement] = [:]
     private var chromiumCache: [pid_t: Bool] = [:]
     private var enhancedAXSet: Set<pid_t> = []
+    /// Reverts copies that land after a clipboard tier has finished. `nil` for scripted (test) hooks.
+    public let lateCopyGuard: PasteboardGuard?
 
     public convenience init(pasteboard: NSPasteboard = .general) {
-        self.init(hooks: .live(pasteboard: pasteboard))
+        let lateCopyGuard = PasteboardGuard(pasteboard: pasteboard)
+        self.init(hooks: .live(pasteboard: pasteboard, lateCopyGuard: lateCopyGuard), lateCopyGuard: lateCopyGuard)
     }
 
-    init(hooks: CaptureChainHooks) {
+    init(hooks: CaptureChainHooks, lateCopyGuard: PasteboardGuard? = nil) {
         self.hooks = hooks
+        self.lateCopyGuard = lateCopyGuard
+    }
+
+    /// Waits until the late-copy guard has finished its grace period (≤ `clipboardGrace`), so a process can
+    /// exit knowing a Copy that landed after a clipboard tier's timeout has been reverted.
+    public func settleClipboard() async {
+        await lateCopyGuard?.waitUntilSettled()
     }
 
     /// Turns `AXEnhancedUserInterface` back off in every app this chain switched it on for.
@@ -141,12 +174,14 @@ public final class CaptureChain {
 
         // Resolved lazily so the (sometimes slow, first-contact) AX round-trip is charged to the tier that needs it.
         let focus = FocusedElementCache()
-        func resolveFocused(refresh: Bool = false) -> AXUIElement? {
+        func resolveFocused(refresh: Bool = false) -> FocusedLookup {
             if refresh || !focus.resolved {
-                focus.element = hooks.focusedElement(app.pid) ?? (refresh ? focus.element : nil)
+                let lookup = hooks.focusedElement(app.pid)
+                // A refresh that finds nothing keeps the element from the previous read.
+                focus.lookup = lookup.element == nil && refresh ? FocusedLookup(element: focus.lookup.element, status: lookup.status) : lookup
                 focus.resolved = true
             }
-            return focus.element
+            return focus.lookup
         }
         var attempts: [TierAttempt] = []
         var text: String?
@@ -167,7 +202,8 @@ public final class CaptureChain {
                 }
                 attempts.append(TierAttempt(
                     tier: 1, ok: outcome.ok, ms: elapsedMs(since: tierStart),
-                    error: outcome.error, retries: retries > 0 ? retries : nil
+                    error: outcome.error, retries: retries > 0 ? retries : nil,
+                    axError: outcome.axError, role: outcome.role
                 ))
                 if let hit = outcome.text { text = hit; winningTier = 1; break tierLoop }
 
@@ -185,12 +221,12 @@ public final class CaptureChain {
                 let outcome: TierOutcome
                 if tier == 2 {
                     if let copyItem {
-                        outcome = await hooks.tier2(copyItem, options.clipboardTimeout)
+                        outcome = await hooks.tier2(copyItem, options.clipboardTimeout, options.clipboardGrace)
                     } else {
                         outcome = .failure("no-copy-menu-item")
                     }
                 } else {
-                    outcome = await hooks.tier3(options.clipboardTimeout)
+                    outcome = await hooks.tier3(options.clipboardTimeout, options.clipboardGrace)
                 }
                 attempts.append(TierAttempt(tier: tier, ok: outcome.ok, ms: elapsedMs(since: tierStart), error: outcome.error))
                 if let hit = outcome.text { text = hit; winningTier = tier; break tierLoop }
@@ -210,7 +246,7 @@ public final class CaptureChain {
         )
         if text != nil {
             let boundsStart = clock.now
-            let located = hooks.locate(resolveFocused())
+            let located = hooks.locate(resolveFocused().element)
             result.bounds = located.bounds
             result.boundsSource = located.source
             result.boundsMs = elapsedMs(since: boundsStart)
@@ -273,7 +309,7 @@ public final class CaptureChain {
 /// non-`Sendable` `AXUIElement` stays in main-actor-isolated storage.
 @MainActor
 private final class FocusedElementCache {
-    var element: AXUIElement?
+    var lookup = FocusedLookup.none
     var resolved = false
 }
 

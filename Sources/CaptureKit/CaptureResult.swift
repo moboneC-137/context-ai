@@ -36,15 +36,23 @@ public struct TierAttempt: Codable, Sendable, Equatable {
     /// Elapsed wall time for this tier alone, including any retries.
     public var ms: Double
     public var error: String?
-    /// Number of extra Tier 1 reads performed after an empty result (Chromium/Electron only).
+    /// Number of extra Tier 1 reads performed after a failure (Chromium/Electron only).
     public var retries: Int?
+    /// Raw `AXError` behind a Tier 1 failure (e.g. −25212 `kAXErrorNoValue`, −25204 `kAXErrorCannotComplete`).
+    public var axError: Int?
+    /// `AXRole` of the focused element on a Tier 1 failure (e.g. `AXWebArea`, `AXTextArea`).
+    public var role: String?
 
-    public init(tier: Int, ok: Bool, ms: Double, error: String? = nil, retries: Int? = nil) {
+    public init(
+        tier: Int, ok: Bool, ms: Double, error: String? = nil, retries: Int? = nil, axError: Int? = nil, role: String? = nil
+    ) {
         self.tier = tier
         self.ok = ok
         self.ms = ms
         self.error = error
         self.retries = retries
+        self.axError = axError
+        self.role = role
     }
 }
 

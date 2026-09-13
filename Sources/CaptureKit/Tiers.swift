@@ -1,13 +1,18 @@
 import AppKit
 import ApplicationServices
 
-/// Result of one tier: text on success, otherwise a short machine-readable error.
+/// Result of one tier: text on success, otherwise a short machine-readable error. Tier 1 failures also
+/// carry the raw `AXError` and the focused element's role, so a miss can be diagnosed from the log alone.
 struct TierOutcome: Sendable, Equatable {
     var text: String?
     var error: String?
+    var axError: Int?
+    var role: String?
 
     static func success(_ text: String) -> TierOutcome { TierOutcome(text: text, error: nil) }
-    static func failure(_ error: String) -> TierOutcome { TierOutcome(text: nil, error: error) }
+    static func failure(_ error: String, axError: AXError? = nil, role: String? = nil) -> TierOutcome {
+        TierOutcome(text: nil, error: error, axError: axError.map { Int($0.rawValue) }, role: role)
+    }
     var ok: Bool { text != nil }
 }
 
@@ -16,12 +21,16 @@ struct TierOutcome: Sendable, Equatable {
 enum Tiers {
     // MARK: Tier 1 — AX kAXSelectedText
 
-    /// Reads `kAXSelectedText` from the focused element. `"empty"` means the attribute was readable but blank,
-    /// which is the signal Chromium gives while its accessibility tree is still being built.
-    static func tier1(focused: AXUIElement?) -> TierOutcome {
-        guard let focused else { return .failure("no-focused-element") }
-        guard let text = AX.string(focused, kAXSelectedTextAttribute) else { return .failure("no-selected-text-attr") }
-        return text.isEmpty ? .failure("empty") : .success(text)
+    /// Reads `kAXSelectedText` from the focused element. `"empty"` means the attribute was readable but blank
+    /// (no selection, or Chromium's tree still catching up); `"no-selected-text-attr"` means the element does
+    /// not answer it at all — Safari's `AXWebArea` says `noValue` (−25212), Tk exposes no text element.
+    static func tier1(focused lookup: FocusedLookup) -> TierOutcome {
+        guard let focused = lookup.element else { return .failure("no-focused-element", axError: lookup.status) }
+        let (value, status) = AX.stringWithStatus(focused, kAXSelectedTextAttribute)
+        guard let text = value else {
+            return .failure("no-selected-text-attr", axError: status, role: AX.string(focused, kAXRoleAttribute))
+        }
+        return text.isEmpty ? .failure("empty", role: AX.string(focused, kAXRoleAttribute)) : .success(text)
     }
 
     // MARK: Tier 2 — AX press on the app's Copy menu item
@@ -55,8 +64,10 @@ enum Tiers {
     }
 
     /// Presses the Copy menu item and waits for the pasteboard to change.
-    static func tier2(copyItem: AXUIElement, pasteboard: NSPasteboard, timeout: Duration) async -> TierOutcome {
-        await viaClipboard(pasteboard: pasteboard, timeout: timeout, failure: "press-failed") {
+    static func tier2(
+        copyItem: AXUIElement, pasteboard: NSPasteboard, lateCopyGuard: PasteboardGuard, timeout: Duration, grace: Duration
+    ) async -> TierOutcome {
+        await viaClipboard(pasteboard: pasteboard, lateCopyGuard: lateCopyGuard, timeout: timeout, grace: grace, failure: "press-failed") {
             AX.perform(copyItem, action: kAXPressAction)
         }
     }
@@ -64,8 +75,8 @@ enum Tiers {
     // MARK: Tier 3 — synthetic ⌘C
 
     /// Posts ⌘C (virtual key 8) through the HID event tap and waits for the pasteboard to change.
-    static func tier3(pasteboard: NSPasteboard, timeout: Duration) async -> TierOutcome {
-        await viaClipboard(pasteboard: pasteboard, timeout: timeout, failure: "post-failed") {
+    static func tier3(pasteboard: NSPasteboard, lateCopyGuard: PasteboardGuard, timeout: Duration, grace: Duration) async -> TierOutcome {
+        await viaClipboard(pasteboard: pasteboard, lateCopyGuard: lateCopyGuard, timeout: timeout, grace: grace, failure: "post-failed") {
             guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 8, keyDown: true),
                   let up = CGEvent(keyboardEventSource: nil, virtualKey: 8, keyDown: false)
             else { return false }
@@ -79,17 +90,31 @@ enum Tiers {
 
     // MARK: Shared clipboard protocol
 
-    /// Snapshot → act → wait for `changeCount` to advance → read → restore via `defer` whenever the
-    /// pasteboard changed (a timeout or failed action that never touched it is left untouched).
+    /// Snapshot → act → wait for `changeCount` to advance → read → restore whenever the pasteboard changed
+    /// (a timeout or failed action that never touched it is left untouched) → arm the late-copy guard, because
+    /// a Copy that lands after the timeout, or a second write after a hit, would otherwise survive the restore.
     private static func viaClipboard(
         pasteboard: NSPasteboard,
+        lateCopyGuard: PasteboardGuard,
         timeout: Duration,
+        grace: Duration,
         failure: String,
         action: () -> Bool
     ) async -> TierOutcome {
+        lateCopyGuard.settle()
         let snapshot = PasteboardSnapshot.take(from: pasteboard)
-        defer { snapshot.restoreIfChanged(to: pasteboard) }
+        let outcome = await attempt(snapshot: snapshot, pasteboard: pasteboard, timeout: timeout, failure: failure, action: action)
+        snapshot.restoreIfChanged(to: pasteboard)
+        if outcome.error != failure {
+            // The action reached the app, so its Copy may still be on its way.
+            lateCopyGuard.arm(snapshot: snapshot, capturedText: outcome.text, grace: grace)
+        }
+        return outcome
+    }
 
+    private static func attempt(
+        snapshot: PasteboardSnapshot, pasteboard: NSPasteboard, timeout: Duration, failure: String, action: () -> Bool
+    ) async -> TierOutcome {
         guard action() else { return .failure(failure) }
         guard await PasteboardWait.forChange(on: pasteboard, from: snapshot.changeCount, timeout: timeout) else {
             return .failure("timeout")

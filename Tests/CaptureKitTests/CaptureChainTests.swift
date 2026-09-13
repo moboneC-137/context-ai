@@ -35,15 +35,15 @@ final class ScriptedHooks {
                 self.enhancedAXLog.append((pid, on))
                 return self.setEnhancedAXSucceeds
             },
-            focusedElement: { _ in self.element },
+            focusedElement: { _ in FocusedLookup(element: self.element, status: .success) },
             tier1: { _ in
                 self.tier1Calls += 1
                 return self.tier1Outcomes.count > 1 ? self.tier1Outcomes.removeFirst() : self.tier1Outcomes[0]
             },
             findCopyItem: { _ in self.copyItemPresent ? self.element : nil },
             copyItemEnabled: { _ in self.copyEnabled },
-            tier2: { _, _ in self.tier2Calls += 1; return self.tier2Outcome },
-            tier3: { _ in self.tier3Calls += 1; return self.tier3Outcome },
+            tier2: { _, _, _ in self.tier2Calls += 1; return self.tier2Outcome },
+            tier3: { _, _ in self.tier3Calls += 1; return self.tier3Outcome },
             locate: { _ in
                 self.locateCalls += 1
                 return BoundsChain.Outcome(bounds: Bounds(x: 1, y: 2, w: 3, h: 4), source: .range)
@@ -160,6 +160,40 @@ struct CaptureChainTests {
         let miss = await CaptureChain(hooks: exhaustedScript.hooks).capture(options: fast)
         #expect(miss.attempts[0].retries == 3)
         #expect(exhaustedScript.tier1Calls == 4)
+    }
+
+    @Test("default options: no Tier 1 retries, 1 s late-copy grace")
+    func defaults() {
+        let options = CaptureOptions()
+        #expect(options.tier1Retries == 0)
+        #expect(options.enhancedAX == true)
+        #expect(options.clipboardGrace == .seconds(1))
+    }
+
+    @Test("Chromium with the default 0 retries reads Tier 1 once and falls through")
+    func chromiumNoRetriesByDefault() async {
+        let script = ScriptedHooks(tier1: [.failure("empty"), .success("would need a retry")])
+        script.chromium = true
+        script.tier2Outcome = .success("menu copy")
+        var options = fast
+        options.tier1Retries = CaptureOptions().tier1Retries
+        let result = await CaptureChain(hooks: script.hooks).capture(options: options)
+        #expect(script.tier1Calls == 1)
+        #expect(result.tier == 2)
+        #expect(result.attempts[0].retries == nil)
+    }
+
+    @Test("Tier 1 diagnostics (axError, role) reach the attempt; absent on success")
+    func tier1Diagnostics() async {
+        let script = ScriptedHooks(tier1: [.failure("no-selected-text-attr", axError: .noValue, role: "AXWebArea")])
+        script.tier2Outcome = .success("copied")
+        let result = await CaptureChain(hooks: script.hooks).capture(options: fast)
+        #expect(result.attempts[0].axError == -25212)
+        #expect(result.attempts[0].role == "AXWebArea")
+        #expect(result.attempts[1].axError == nil && result.attempts[1].role == nil)
+
+        let hit = await CaptureChain(hooks: ScriptedHooks(tier1: [.success("x")]).hooks).capture(options: fast)
+        #expect(hit.attempts[0].axError == nil && hit.attempts[0].role == nil)
     }
 
     @Test("non-Chromium apps never retry Tier 1; --no-enhanced-ax disables it for Chromium too")

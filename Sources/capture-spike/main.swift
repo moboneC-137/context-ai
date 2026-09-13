@@ -59,6 +59,8 @@ final class Session {
     func runOnce() async -> Int32 {
         let result = await chain.capture(options: arguments.captureOptions)
         output.emit(result.truncatingText(to: arguments.maxText).jsonLine())
+        // A Copy that lands after a clipboard tier's timeout must be reverted before this process is gone.
+        await chain.settleClipboard()
         chain.resetEnhancedAX()
         output.close()
         return result.isHit ? 0 : 1
@@ -83,6 +85,7 @@ final class Session {
 
     private func mouseUp(at point: CGPoint, clickCount: Int) {
         guard gate.mouseUp(at: point, clickCount: clickCount, now: .now) else { return }
+        guard !finishRequested else { return }
         guard !capturing else { skippedWhileCapturing += 1; return }
         capturing = true
         Task { @MainActor in
@@ -90,30 +93,38 @@ final class Session {
             results.append(result)
             output.emit(result.truncatingText(to: arguments.maxText).jsonLine())
             capturing = false
-            if finishRequested { finish() }
         }
     }
 
-    /// Prints the per-app summary and terminates the process. If a capture is mid-flight (its clipboard
-    /// restore still pending) the exit is deferred until that capture completes; a second signal forces it.
+    /// Prints the per-app summary and terminates the process. A capture in flight is allowed to finish
+    /// (so its clipboard restore runs) and the late-copy guard to settle (at most the grace period) first;
+    /// a second signal forces the exit.
     func finish() {
+        if finishRequested {
+            stderr("capture-spike: forced exit; the clipboard may not have been restored")
+            exit(130)
+        }
+        finishRequested = true
         if capturing {
-            if finishRequested {
-                stderr("capture-spike: forced exit; the clipboard may not have been restored")
-                exit(130)
-            }
-            finishRequested = true
             stderr("capture-spike: finishing the capture in flight…")
-            return
+        } else if chain.lateCopyGuard?.isArmed ?? false {
+            stderr("capture-spike: waiting for the clipboard to settle…")
         }
-        chain.resetEnhancedAX()
-        output.close()
-        stderr("")
-        stderr(Stats.renderTable(Stats.summarize(results)))
-        if skippedWhileCapturing > 0 {
-            stderr("\(skippedWhileCapturing) gesture\(skippedWhileCapturing == 1 ? "" : "s") skipped while a capture was in flight")
+        Task { @MainActor in
+            while capturing { try? await Task.sleep(for: .milliseconds(20)) }
+            await chain.settleClipboard()
+            chain.resetEnhancedAX()
+            output.close()
+            stderr("")
+            stderr(Stats.renderTable(Stats.summarize(results)))
+            if skippedWhileCapturing > 0 {
+                stderr("\(skippedWhileCapturing) gesture\(skippedWhileCapturing == 1 ? "" : "s") skipped while a capture was in flight")
+            }
+            if let reverted = chain.lateCopyGuard?.restoredLateCopies, reverted > 0 {
+                stderr("\(reverted) late cop\(reverted == 1 ? "y" : "ies") reverted after a clipboard tier had finished")
+            }
+            exit(0)
         }
-        exit(0)
     }
 }
 
