@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "ContextAI application layer: invocation, capture policy, actions, providers, panel and evals on top of the Swift capture-spike."
 requires-python = ">=3.12"
 dependencies = [
+    "pyobjc-framework-cocoa>=12.2.2",
+    "pyobjc-framework-quartz>=12.2.2",
     "pyyaml>=6.0.3",
 ]
 

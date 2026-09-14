@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import socket
 import subprocess
 import urllib.error
 import urllib.request
@@ -35,7 +34,7 @@ KEYCHAIN_SERVICE = "ContextAI"
 KEYCHAIN_ACCOUNT = "openai"
 
 Transport = Callable[[str, bytes, Mapping[str, str], float], tuple[int, bytes]]
-"""(url, body, headers, timeout) -> (status, body). Raises urllib/socket errors for transport failures."""
+"""(url, body, headers, timeout) -> (status, body). Raises urllib/OS errors for transport failures."""
 
 
 def urllib_transport(url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> tuple[int, bytes]:

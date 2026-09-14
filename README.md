@@ -52,18 +52,29 @@ uv sync                                                   # creates .venv with p
 uv run pytest                                             # Python tests (pytests/ — see note)
 uv run python -m evals.run --template all --provider mock # prompt evals against the Mock Provider
 uv run python -m evals.run --template all --provider openai --model gpt-4o-mini   # needs an API key
+uv run python -m contextai.app --provider mock --target-language Chinese          # the app (v0 demo)
 ```
+
+Running the app: it lives in the terminal (no Dock icon), waits for **⌃⌥Space** (`--hotkey` to change),
+captures the current selection, and shows a floating panel with Summarize / Translate beside it.
+Esc or a click outside dismisses it; Copy is the only way it writes the clipboard. `--target-language` is
+required on purpose — there is no default. With `--provider openai` the key comes from the Keychain or
+`OPENAI_API_KEY`. The terminal you launch from must be granted Accessibility (see below); the app's own
+hotkey uses a consuming event tap, so the chord never reaches the app you are working in.
 
 The tests live in `pytests/`, not `tests/`: this filesystem is case-insensitive and `tests/` would
 resolve into SwiftPM's `Tests/`.
 
-What is in the package so far (migration steps 1–2 of `docs/swift-python-split-2026-09-14.md`):
+What is in the package so far (migration steps 1–3 of `docs/swift-python-split-2026-09-14.md`):
 
 | Module | Role |
 | --- | --- |
 | `contextai/capture/` | The only Swift/Python boundary: spawns `capture-spike --once`, parses the JSON line (contract v1), typed errors for exit 2 / 64 / timeout. |
 | `contextai/providers/` | `Provider` protocol, typed errors (`NoNetwork`, `Timeout`, `RateLimit`, `APIError`, `NotConfigured`, `SelectionTooLong`), `OpenAIProvider` (SDK-free, key from Keychain or `OPENAI_API_KEY`), deterministic `MockProvider`. |
 | `contextai/actions/` | Action Templates as versioned YAML (`templates/summarize.yaml`, `translate.yaml`), strict loader, `ActionEngine` (size cap before any request, explicit target language, same-language sentinel). |
+| `contextai/ui/` | `placement.py` (pure: beside the selection, flip, clamp, mouse fallback), `state.py` (pure: the panel states and every failure → state mapping), `panel.py` (PyObjC non-activating `NSPanel` that never becomes key). |
+| `contextai/input/` | `hotkey.py`: binding parser + a Quartz event tap that consumes the chord (key-down *and* key-up). |
+| `contextai/app.py` | Main loop: hotkey → capture on a worker thread → panel → action on a worker thread → render; generation counter drops results that arrive after Esc. |
 | `evals/` | The Evals Harness: golden sets under `evals/golden/<template>/`, declarative checks (language, must/must-not contain, length, similarity), report + exit status. Not a CI gate. |
 
 The OpenAI key is read from the login Keychain (`security add-generic-password -s ContextAI -a openai -w`)
