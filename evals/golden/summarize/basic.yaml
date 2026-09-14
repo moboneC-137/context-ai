@@ -1,0 +1,40 @@
+# Golden Set for summarize (PRD FR-17, FR-27). Each case declares its checks; `mock_output` is what
+# the Mock Provider returns for `--provider mock` runs (exercises the harness, not the prompt).
+cases:
+  - id: en-paragraph
+    input: |
+      The Accessibility API lets one application read the user-interface tree of another. Most native
+      Mac apps expose the selected text through it, so a tool can read a selection without touching the
+      clipboard. Electron and Chromium apps only expose it after a per-process flag is set, and Safari
+      hides selections behind WebKit-specific text markers, which is why any robust capture tool needs an
+      ordered chain of fallbacks rather than a single mechanism.
+    checks:
+      language: en
+      must_contain: [accessibility, fallback]
+      must_not_contain: ["here is a summary", "summary:"]
+      max_ratio: 0.6
+      min_chars: 40
+    mock_output: |
+      The Accessibility API exposes selected text in most native Mac apps, but Chromium apps need a flag
+      and Safari hides it, so a capture tool needs an ordered chain of fallbacks.
+
+  - id: zh-paragraph
+    input: |
+      辅助功能接口允许一个应用读取另一个应用的界面树。大多数原生 Mac 应用会通过它暴露当前选中的文本，
+      因此工具无需触碰剪贴板即可读取选区。但 Electron 与 Chromium 应用只有在设置了进程级标志后才会暴露，
+      Safari 则把选区藏在 WebKit 特有的文本标记之后，所以稳健的捕获工具需要一条有序的回退链，而不是单一机制。
+    checks:
+      language: zh
+      must_contain: [回退]
+      max_ratio: 0.7
+      min_chars: 20
+    mock_output: |
+      大多数原生 Mac 应用通过辅助功能接口暴露选中文本，但 Chromium 应用需要标志、Safari 藏起选区，所以捕获工具需要有序的回退链。
+
+  - id: en-short
+    input: The meeting moved to Thursday at 3 pm; bring the latency numbers.
+    checks:
+      language: en
+      must_contain: [Thursday]
+      max_chars: 120
+    mock_output: The meeting is now Thursday at 3 pm; bring the latency numbers.

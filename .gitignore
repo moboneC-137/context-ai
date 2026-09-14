@@ -2,3 +2,9 @@
 .swiftpm/
 *.jsonl
 .DS_Store
+
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/

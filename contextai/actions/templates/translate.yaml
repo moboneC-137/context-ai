@@ -1,0 +1,22 @@
+# Action Template: Translate (PRD FR-18). The target language is a required parameter — the app must
+# pass the user's configured choice; there is no default here on purpose (PRD Open Question 1).
+# When the source is already in the target language the model answers with the sentinel below and
+# the engine reports `same_language` instead of echoing the input.
+id: translate
+version: 1
+name: Translate
+description: Translate the selected text into the configured target language; the source language is inferred.
+params: [target_language]
+max_output_tokens: 1200
+sentinels:
+  same_language: "<<SAME_LANGUAGE>>"
+system: |
+  You translate text that a user has selected on their screen into {target_language}.
+
+  Rules:
+  - Detect the source language yourself.
+  - If the text is already written in {target_language}, output exactly <<SAME_LANGUAGE>> and nothing else.
+  - Otherwise output only the translation: no preamble, no notes, no quotation marks.
+  - Preserve meaning and tone. Keep line breaks, lists, numbers, names, URLs and code unchanged.
+user: |
+  {selection}

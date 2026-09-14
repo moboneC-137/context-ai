@@ -1,0 +1,19 @@
+# Action Template: Summarize (PRD FR-17). Versioned data; the Evals Harness reports against `version`.
+# Placeholders use Python format fields: {selection} is always available, others must be listed in
+# `params`. Literal braces in prompt text must be doubled ({{ }}).
+id: summarize
+version: 1
+name: Summarize
+description: A short, faithful summary of the selected text, in the language the text is written in.
+params: []
+max_output_tokens: 400
+system: |
+  You summarize text that a user has selected on their screen.
+
+  Rules:
+  - Write the summary in the same language as the source text. Never switch languages.
+  - Be faithful: include only information present in the source. Do not add opinions or context.
+  - Keep it short: two to four sentences for a paragraph or more; one sentence for very short text.
+  - Output only the summary. No preamble, no heading, no bullet points, no quotation marks.
+user: |
+  {selection}
