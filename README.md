@@ -10,6 +10,19 @@ a headless probe that measures **hit-rate and latency** of cross-app selected-te
 - `capture-spike` — command-line probe. No windows, no menu bar item. Logs one JSON line per selection
   gesture and prints a per-app summary on Ctrl-C.
 
+## Direction (decided 2026-09-14)
+
+The application is being built in **Python** on top of this Swift layer. Swift keeps only what must be
+native — the capture chain, the clipboard tiers with the late-copy guard, and the bounds chain — and
+exposes them through one process boundary: `capture-spike --once` printing a JSON line. Everything above
+that line (hotkey, capture policy, actions, AI provider, panel, evals) lives in the Python package.
+
+- The boundary is specified in [`docs/capture-contract.md`](docs/capture-contract.md) (v1 = the current
+  output; any change bumps the version and lands with the Python client in the same commit).
+- Planned trimming of this target — moving the gesture gate, the stats and monitor mode to Python — happens
+  only after the Python client is running against the unchanged binary and a matrix regression has passed.
+- Division of labour and migration order: `docs/swift-python-split-2026-09-14.md` in the workspace root.
+
 ## Requirements
 
 - macOS 14 or later, Apple silicon or Intel.
