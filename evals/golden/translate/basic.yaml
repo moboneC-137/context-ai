@@ -1,0 +1,40 @@
+# Golden Set for translate (PRD FR-18, FR-27). `params.target_language` is per case: the template has
+# no default target on purpose (Open Question 1). `same_language` asserts the engine-level sentinel.
+cases:
+  - id: en-to-zh
+    input: The panel appears beside the selection and never steals focus from the app you are working in.
+    params: {target_language: Chinese}
+    checks:
+      language: zh
+      must_contain: [焦点]
+      same_language: false
+      must_not_contain: ["<<SAME_LANGUAGE>>"]
+    mock_output: 面板出现在选区旁边，并且不会从你正在使用的应用夺走焦点。
+
+  - id: zh-to-en
+    input: 选中文本后按下快捷键，面板就会出现在文字旁边。
+    params: {target_language: English}
+    checks:
+      language: en
+      must_contain: [panel]
+      same_language: false
+    mock_output: After selecting text, press the shortcut and the panel appears next to the text.
+
+  - id: already-target-language
+    input: This sentence is already written in English.
+    params: {target_language: English}
+    checks:
+      same_language: true
+      max_chars: 0
+    mock_output: "<<SAME_LANGUAGE>>"
+
+  - id: preserves-code-and-url
+    input: |
+      Run `uv run pytest` before pushing. Docs: https://example.com/contract
+    params: {target_language: Chinese}
+    checks:
+      language: zh
+      must_contain: ["uv run pytest", "https://example.com/contract"]
+      same_language: false
+    mock_output: |
+      推送前运行 `uv run pytest`。文档：https://example.com/contract

@@ -41,6 +41,34 @@ Tools**, SwiftPM does not discover Swift Testing by itself, so bare `swift test`
 and exits 0. The script adds `-Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks`
 when `xcode-select -p` points at the CLT and checks that the output reports a non-zero test count.
 
+### Python side
+
+The application layer is the `contextai` package, managed with [`uv`](https://docs.astral.sh/uv/)
+(Python ≥ 3.12; the only non-Python runtime dependency is the `capture-spike` binary above).
+
+```sh
+cd context-ai
+uv sync                                                   # creates .venv with pytest and pyyaml
+uv run pytest                                             # Python tests (pytests/ — see note)
+uv run python -m evals.run --template all --provider mock # prompt evals against the Mock Provider
+uv run python -m evals.run --template all --provider openai --model gpt-4o-mini   # needs an API key
+```
+
+The tests live in `pytests/`, not `tests/`: this filesystem is case-insensitive and `tests/` would
+resolve into SwiftPM's `Tests/`.
+
+What is in the package so far (migration steps 1–2 of `docs/swift-python-split-2026-09-14.md`):
+
+| Module | Role |
+| --- | --- |
+| `contextai/capture/` | The only Swift/Python boundary: spawns `capture-spike --once`, parses the JSON line (contract v1), typed errors for exit 2 / 64 / timeout. |
+| `contextai/providers/` | `Provider` protocol, typed errors (`NoNetwork`, `Timeout`, `RateLimit`, `APIError`, `NotConfigured`, `SelectionTooLong`), `OpenAIProvider` (SDK-free, key from Keychain or `OPENAI_API_KEY`), deterministic `MockProvider`. |
+| `contextai/actions/` | Action Templates as versioned YAML (`templates/summarize.yaml`, `translate.yaml`), strict loader, `ActionEngine` (size cap before any request, explicit target language, same-language sentinel). |
+| `evals/` | The Evals Harness: golden sets under `evals/golden/<template>/`, declarative checks (language, must/must-not contain, length, similarity), report + exit status. Not a CI gate. |
+
+The OpenAI key is read from the login Keychain (`security add-generic-password -s ContextAI -a openai -w`)
+or, for development, from `OPENAI_API_KEY`. It is never written to logs, `repr` or error messages.
+
 ## Grant Accessibility to the terminal
 
 Reading another app's selection needs the Accessibility permission. macOS attributes a command-line
