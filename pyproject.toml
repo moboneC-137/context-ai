@@ -1,0 +1,22 @@
+[project]
+name = "contextai"
+version = "0.1.0"
+description = "ContextAI application layer: invocation, capture policy, actions, providers, panel and evals on top of the Swift capture-spike."
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["contextai"]
+
+[tool.pytest.ini_options]
+testpaths = ["pytests"]  # "tests" would collide with SwiftPM's Tests/ on a case-insensitive filesystem
+addopts = "-q"
