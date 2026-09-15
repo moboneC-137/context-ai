@@ -12,6 +12,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "ruff>=0.16",
 ]
 
 [build-system]
@@ -25,3 +26,13 @@ packages = ["contextai"]
 testpaths = ["pytests"]  # "tests" would collide with SwiftPM's Tests/ on a case-insensitive filesystem
 addopts = "-q"
 pythonpath = ["."]  # makes the top-level evals/ package importable in tests
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = [".build", "Sources", "Tests"]
+
+[tool.ruff.lint]
+# Pyflakes + pycodestyle errors + import order: the set the code was written against. Stricter rule
+# families (UP, B, RUF, PL) report ~40 findings on the current code and are a separate change.
+select = ["E4", "E7", "E9", "F", "I"]

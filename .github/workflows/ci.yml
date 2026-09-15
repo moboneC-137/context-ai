@@ -1,0 +1,51 @@
+# CI: the two test suites and the zero-warning release build (PRD NFR-7), on every push to main and
+# every pull request. Both jobs run on macOS because the Swift package needs AppKit/ApplicationServices
+# and the Python package depends on PyObjC. Nothing here needs Accessibility, an API key or a live app:
+# the Swift chain is tested through a scripted seam, the Python side against a fake binary and the
+# Mock Provider. Live capture and real-provider evals stay manual (see README, PRD §4.8 / E14).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift:
+    name: Swift (build + tests)
+    runs-on: macos-26   # Xcode 26.x → Swift 6.3, matching the toolchain the package is developed with
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain
+        run: |
+          xcode-select -p
+          swift --version
+      - name: Release build, warnings as errors
+        run: swift build -c release -Xswiftc -warnings-as-errors
+      - name: Tests
+        # scripts/test.sh fails unless at least one test ran; the CLT-only framework flag is a no-op
+        # on a runner with Xcode selected.
+        run: scripts/test.sh
+
+  python:
+    name: Python (lint + tests + mock evals)
+    runs-on: macos-26   # PyObjC wheels; no Linux equivalent
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.1.0   # no floating v10 major tag exists (majors stop at v7)
+        with:
+          enable-cache: true
+      - name: Sync
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check .
+      - name: Tests
+        run: uv run pytest
+      - name: Evals harness smoke test (Mock Provider)
+        # Proves loader → engine → checks → report end to end. Not a prompt-quality gate: that needs
+        # a real provider and is run by hand (PRD FR-27, §11 E14).
+        run: uv run python -m evals.run --template all --provider mock
