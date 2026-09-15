@@ -55,15 +55,38 @@ uv sync                                                   # creates .venv with p
 uv run pytest                                             # Python tests (pytests/ — see note)
 uv run python -m evals.run --template all --provider mock # prompt evals against the Mock Provider
 uv run python -m evals.run --template all --provider openai --model gpt-4o-mini   # needs an API key
-uv run python -m contextai.app --provider mock --target-language Chinese          # the app (v0 demo)
+uv run python -m contextai.settings set target_language Chinese                   # once, persisted
+uv run python -m contextai.app --provider mock                                    # the app (v0 demo)
 ```
 
 Running the app: it lives in the terminal (no Dock icon), waits for **⌃⌥Space** (`--hotkey` to change),
 captures the current selection, and shows a floating panel with Summarize / Translate beside it.
-Esc or a click outside dismisses it; Copy is the only way it writes the clipboard. `--target-language` is
-required on purpose — there is no default. With `--provider openai` the key comes from the Keychain or
-`OPENAI_API_KEY`. The terminal you launch from must be granted Accessibility (see below); the app's own
-hotkey uses a consuming event tap, so the chord never reaches the app you are working in.
+Esc or a click outside dismisses it; Copy is the only way it writes the clipboard. A target language is
+required on purpose — there is no default — but it only has to be set *somewhere*: in the settings file
+(`contextai.settings set target_language …`) or as `--target-language` on the command line. Without either
+the app exits 2 and prints the `set` command to run. With `--provider openai` the key comes from the
+Keychain or `OPENAI_API_KEY`. The terminal you launch from must be granted Accessibility (see below); the
+app's own hotkey uses a consuming event tap, so the chord never reaches the app you are working in.
+
+Settings persist in `~/Library/Application Support/ContextAI/settings.toml` (override the path with
+`--settings PATH` or `CONTEXTAI_SETTINGS`). Every app flag is optional and beats the file value; the file
+value beats the code default. `--exclude` is the exception: it *adds* to the file's `excluded_apps`.
+Keys and types: `target_language` (string), `provider` (`"mock"` | `"openai"`), `model` (string), `hotkey`
+(string, e.g. `"ctrl+alt+space"`), `auto_appear` (bool), `excluded_apps` (list of bundle-id strings),
+`diagnostics` (bool: on/off at the default log path — whereas the app's `--diagnostics` flag takes a *path*),
+`selection_cap` (integer > 0). The API key is never a settings key — an unknown key is an error.
+`set` and `unset` rewrite the whole file, so hand-written comments are not preserved. On the settings CLI,
+`--settings PATH` goes before the subcommand (`contextai.settings --settings PATH show`).
+
+```sh
+uv run python -m contextai.settings show                              # every key, its value and source
+uv run python -m contextai.settings set provider openai
+uv run python -m contextai.settings set excluded_apps com.apple.Terminal,com.microsoft.VSCode
+uv run python -m contextai.settings set auto_appear true
+uv run python -m contextai.settings unset model
+uv run python -m contextai.settings path
+uv run python -m contextai.app --no-auto-appear                       # flag beats the file for this run
+```
 
 The tests live in `pytests/`, not `tests/`: this filesystem is case-insensitive and `tests/` would
 resolve into SwiftPM's `Tests/`.
@@ -79,6 +102,7 @@ What is in the package (migration steps 1–4 of `docs/swift-python-split-2026-0
 | `contextai/input/` | `hotkey.py`: binding parser + a Quartz event tap that consumes the chord (key-down *and* key-up). `monitor.py`: the opt-in Auto-Appear mouse monitor feeding the gate. |
 | `contextai/policy.py` | Capture Policy as data: line-copying editors (VS Code, IntelliJ) treat Tier 1 `empty` as no selection; exclusion list for Auto-Appear; per-app tier overrides. |
 | `contextai/diagnostics.py` | Per-capture JSONL metadata (never text), default `~/Library/Logs/ContextAI/captures.jsonl`. |
+| `contextai/settings.py` | Persisted settings: flat TOML under Application Support, one `SettingsError` listing every bad key, CLI flag > file > default (`--exclude` unions), and the `show` / `set` / `unset` / `path` CLI. Never holds the API key. |
 | `tools/` | `matrix_report.py` (per-app hit-rate / p50 / p95 / tier histogram from JSONL), `press_key.py` (post a key chord via CGEvent). |
 | `contextai/app.py` | Main loop: hotkey → capture on a worker thread → panel → action on a worker thread → render; generation counter drops results that arrive after Esc. |
 | `evals/` | The Evals Harness: golden sets under `evals/golden/<template>/`, declarative checks (language, must/must-not contain, length, similarity), report + exit status. Not a CI gate. |
@@ -110,7 +134,7 @@ Python; the Swift binary only runs the chain once per call.
 
 ```sh
 uv run python -m contextai.app --provider mock --target-language Chinese \
-    --auto-appear --diagnostics matrix.jsonl
+    --auto-appear --diagnostics matrix.jsonl        # or set these once via contextai.settings
 ```
 
 Work through the matrix: in each app, select text by dragging (more than 3 pt) or by double/triple-clicking.
