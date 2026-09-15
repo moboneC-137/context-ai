@@ -1,14 +1,17 @@
 # context-ai
 
 Context AI reads the text a user has just selected in *any* macOS app and offers AI actions on it.
-Before any UI exists, this repository holds the de-risking spike from the brief (Risk 2, addendum B5):
-a headless probe that measures **hit-rate and latency** of cross-app selected-text capture.
+The repository started as the de-risking spike from the brief (Risk 2, addendum B5) — a headless probe
+that measured **hit-rate and latency** of cross-app selected-text capture — and now holds that capture
+layer in Swift plus the application in Python:
 
-- `CaptureKit` — library: the layered capture chain (Tier 1 AX `kAXSelectedText` → Tier 2 AX press on
-  `Edit > Copy` → Tier 3 synthetic ⌘C), the bounds chain, the selection gate and the stats. The app
-  will depend on this target directly.
-- `capture-spike` — command-line probe. No windows, no menu bar item. Logs one JSON line per selection
-  gesture and prints a per-app summary on Ctrl-C.
+- `CaptureKit` — Swift library: the layered capture chain (Tier 1 AX `kAXSelectedText` → Tier 2 AX
+  press on `Edit > Copy` → Tier 3 synthetic ⌘C), the clipboard snapshot and late-copy guard, the bounds
+  chain, and the JSON line that is the contract.
+- `capture-spike` — the command-line front of that library: runs the chain once on the frontmost app
+  and prints one JSON line. No windows, no menu bar item, no state.
+- `contextai/` — the Python application: hotkey and auto-appear, capture policy, actions, providers,
+  the floating panel, diagnostics; plus `evals/` and `tools/`.
 
 ## Direction (decided 2026-09-14)
 
@@ -19,8 +22,8 @@ that line (hotkey, capture policy, actions, AI provider, panel, evals) lives in 
 
 - The boundary is specified in [`docs/capture-contract.md`](docs/capture-contract.md) (v1 = the current
   output; any change bumps the version and lands with the Python client in the same commit).
-- Planned trimming of this target — moving the gesture gate, the stats and monitor mode to Python — happens
-  only after the Python client is running against the unchanged binary and a matrix regression has passed.
+- The trimming of this target — gesture gate, stats, persistence and monitor mode moved to Python — landed
+  in migration step 4 (2026-09-14) after a four-app regression; the contract's version stayed 1.
 - Division of labour and migration order: `docs/swift-python-split-2026-09-14.md` in the workspace root.
 
 ## Requirements
@@ -33,7 +36,7 @@ that line (hotkey, capture policy, actions, AI provider, panel, evals) lives in 
 ```sh
 cd context-ai
 swift build -c release            # → .build/release/capture-spike
-scripts/test.sh                   # runs the tests and fails unless tests actually ran
+scripts/test.sh                   # runs the Swift tests (42) and fails unless tests actually ran
 ```
 
 Use `scripts/test.sh` rather than bare `swift test`. On a machine that has **only the Command Line
@@ -65,15 +68,18 @@ hotkey uses a consuming event tap, so the chord never reaches the app you are wo
 The tests live in `pytests/`, not `tests/`: this filesystem is case-insensitive and `tests/` would
 resolve into SwiftPM's `Tests/`.
 
-What is in the package so far (migration steps 1–3 of `docs/swift-python-split-2026-09-14.md`):
+What is in the package (migration steps 1–4 of `docs/swift-python-split-2026-09-14.md`):
 
 | Module | Role |
 | --- | --- |
-| `contextai/capture/` | The only Swift/Python boundary: spawns `capture-spike --once`, parses the JSON line (contract v1), typed errors for exit 2 / 64 / timeout. |
+| `contextai/capture/` | The only Swift/Python boundary: spawns `capture-spike --once`, parses the JSON line (contract v1), typed errors for exit 2 / 64 / timeout. `gate.py` is the SelectionGate (drag > 3 pt, double/triple-click, 200 ms debounce). |
 | `contextai/providers/` | `Provider` protocol, typed errors (`NoNetwork`, `Timeout`, `RateLimit`, `APIError`, `NotConfigured`, `SelectionTooLong`), `OpenAIProvider` (SDK-free, key from Keychain or `OPENAI_API_KEY`), deterministic `MockProvider`. |
 | `contextai/actions/` | Action Templates as versioned YAML (`templates/summarize.yaml`, `translate.yaml`), strict loader, `ActionEngine` (size cap before any request, explicit target language, same-language sentinel). |
 | `contextai/ui/` | `placement.py` (pure: beside the selection, flip, clamp, mouse fallback), `state.py` (pure: the panel states and every failure → state mapping), `panel.py` (PyObjC non-activating `NSPanel` that never becomes key). |
-| `contextai/input/` | `hotkey.py`: binding parser + a Quartz event tap that consumes the chord (key-down *and* key-up). |
+| `contextai/input/` | `hotkey.py`: binding parser + a Quartz event tap that consumes the chord (key-down *and* key-up). `monitor.py`: the opt-in Auto-Appear mouse monitor feeding the gate. |
+| `contextai/policy.py` | Capture Policy as data: line-copying editors (VS Code, IntelliJ) treat Tier 1 `empty` as no selection; exclusion list for Auto-Appear; per-app tier overrides. |
+| `contextai/diagnostics.py` | Per-capture JSONL metadata (never text), default `~/Library/Logs/ContextAI/captures.jsonl`. |
+| `tools/` | `matrix_report.py` (per-app hit-rate / p50 / p95 / tier histogram from JSONL), `press_key.py` (post a key chord via CGEvent). |
 | `contextai/app.py` | Main loop: hotkey → capture on a worker thread → panel → action on a worker thread → render; generation counter drops results that arrive after Esc. |
 | `evals/` | The Evals Harness: golden sets under `evals/golden/<template>/`, declarative checks (language, must/must-not contain, length, similarity), report + exit status. Not a CI gate. |
 
@@ -99,14 +105,25 @@ also covers the case where the global mouse monitor could not be installed.
 
 ## Run the B5 matrix
 
+Since migration step 4 the gesture monitor, the per-app statistics and the JSONL persistence live in
+Python; the Swift binary only runs the chain once per call.
+
 ```sh
-.build/release/capture-spike --out matrix.jsonl
+uv run python -m contextai.app --provider mock --target-language Chinese \
+    --auto-appear --diagnostics matrix.jsonl
 ```
 
-The tool prints `listening …` on stderr and then waits. Work through the matrix: in each app, select text
-by dragging (more than 3 pt) or by double/triple-clicking a word or paragraph. Every qualifying mouseUp
-produces one JSON line on stdout (and in `matrix.jsonl`). Plain clicks and typing produce nothing and
-never touch the clipboard. Do a handful of selections per app so the percentiles mean something.
+Work through the matrix: in each app, select text by dragging (more than 3 pt) or by double/triple-clicking.
+Every qualifying mouseUp runs one capture and appends one metadata record (never the text) to
+`matrix.jsonl`; the panel shows what was captured. Plain clicks and typing produce nothing and never touch
+the clipboard. Do a handful of selections per app so the percentiles mean something, then:
+
+```sh
+uv run python -m tools.matrix_report matrix.jsonl              # terminal table
+uv run python -m tools.matrix_report matrix.jsonl --markdown   # for this README
+```
+
+The report also reads the spike's original `--out` lines, so the 2026-09-13 records still roll up.
 
 | App | Where to select | Measured on 2026-09-13 (macOS 26, warm; p95 = max of 9) |
 | --- | --- | --- |
@@ -122,6 +139,19 @@ never touch the clipboard. Do a handful of selections per app so the percentiles
 Every warm hit is under the brief's 300 ms bar; hit-rate on real selections was 100% in all eight apps.
 The full record, including what went wrong, is in
 `_bmad-output/implementation-artifacts/capture-matrix-results.md`.
+
+Regression after the step-4 trim (2026-09-14, spawned per capture from Python, so each number includes
+the ~30 ms spawn and the per-spawn AX first contact — see `python-migration-step1.md`):
+
+| app | attempts | hits | hit-rate | p50 ms | p95 ms | tiers (1/2/3/fail) |
+| --- | --- | --- | --- | --- | --- | --- |
+| com.apple.Preview | 4 | 4 | 100% | 87.0 | 95.3 | 4/0/0/0 |
+| com.apple.Safari | 4 | 4 | 100% | 134.3 | 206.8 | 0/4/0/0 |
+| com.apple.TextEdit | 6 | 5 | 83% | 86.0 | 126.0 | 5/0/0/1 |
+| com.google.Chrome | 4 | 4 | 100% | 80.4 | 106.4 | 4/0/0/0 |
+
+Same tiers and bounds sources as the table above (the TextEdit miss is a synthetic-drag artifact: AppKit
+ignores a scripted drag while a selection exists — the record says `no-selection`, nothing was copied).
 
 ### Support tiers (measured)
 
@@ -147,25 +177,23 @@ Two things to keep in mind while gathering data:
   current line** when nothing is selected, which the chain reports as a Tier 2 hit — a false positive
   you should expect in the data.
 
-Press **Ctrl-C** when done. If a capture is mid-flight the tool finishes it first (so the clipboard is
-restored), then prints the summary to stderr.
+Press **Ctrl-C** in the app's terminal when done; a capture in flight finishes first (so the clipboard is
+restored).
 
-Useful variants:
+The binary on its own, for scripted measurements (it runs the chain immediately on whatever app is
+frontmost, so give another app focus and a selection first):
 
 ```sh
-.build/release/capture-spike --tiers 1               # AX only; never touches the clipboard
-.build/release/capture-spike --no-enhanced-ax        # measure Chrome/Electron without the AXEnhancedUserInterface hint
-.build/release/capture-spike --tier1-retries 3       # re-enable the 3 × 150 ms Chromium retry loop (measured: net loss)
-.build/release/capture-spike --max-text 0            # log the full selected text
-.build/release/capture-spike --once                  # one capture of the focused app, then exit (0 = got text, 1 = not)
+.build/release/capture-spike --once --max-text 0                    # what the app runs; exit 0 = got text, 1 = not
+.build/release/capture-spike --once --tiers 1                       # AX only; never touches the clipboard
+.build/release/capture-spike --once --no-enhanced-ax                # measure Chrome/Electron without the AXEnhancedUserInterface hint
+.build/release/capture-spike --once --tier1-retries 3               # re-enable the 3 × 150 ms Chromium retry loop (measured: net loss)
 ```
-
-`--once` runs the chain immediately on whatever app is frontmost, which is only useful when the tool is
-driven from a script or another app already has focus and a selection.
 
 ## Read the output
 
-One line per gesture, keys sorted:
+One line per capture, keys sorted (the app's diagnostics records are the same line without `text`, plus
+`hit` and `spawnMs`):
 
 ```json
 {"app":"com.apple.Safari","attempts":[{"ms":4.1,"ok":true,"tier":1}],"bounds":{"h":18.0,"w":280.0,"x":312.0,"y":544.5},
@@ -189,9 +217,9 @@ success or failure. Tier 3 only counts as a hit when `changeCount` advanced with
 tier the pasteboard is watched for one more second: a Copy that lands late (Preview renders the page
 before copying; IntelliJ writes twice) is reverted — but only if no key or mouse button was pressed since
 the tier finished, and, when the tier captured text, only if the late write is that same text. Your own
-⌘C or Edit > Copy always wins. The summary reports how many late copies were reverted.
+⌘C or Edit > Copy always wins.
 
-The Ctrl-C summary, per app:
+The per-app report (`tools/matrix_report.py`):
 
 ```
 app                   attempts  hits  hit-rate  p50 ms  p95 ms  tiers (1/2/3/fail)
@@ -203,7 +231,7 @@ com.apple.Terminal    6         4     67%       120.5   140.1   0/0/4/2
 
 `p50`/`p95` are over hits only (`totalMs`); `attempts` shows how many gestures produced nothing. The
 brief's bar: if p95 exceeds ~300 ms the interaction is dead regardless of the rest of the app. An empty
-session prints `no captures`.
+file prints `no captures`.
 
 ## Known limitations
 

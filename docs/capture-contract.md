@@ -17,14 +17,14 @@ capture-spike --once --max-text 0 [--tiers 1,2,3] [--no-enhanced-ax] [--tier1-re
 
 | Flag | Meaning | Default | Caller guidance |
 | --- | --- | --- | --- |
-| `--once` | Run the chain once on the frontmost app, print one line, exit. | off (monitor mode) | **Always pass it.** Monitor mode is the spike's own tool and is not part of this contract. |
+| `--once` | Run the chain once on the frontmost app, print one line, exit. | accepted; since step 4 the only mode | **Always pass it.** (The spike's monitor mode was removed in migration step 4; the flag stays so v1 callers are unchanged.) |
 | `--max-text N` | Truncate `text` to N characters, appending `…`. `0` = unlimited. | **200** | **Always pass `0`.** The default exists for log readability; an application needs the whole selection. If `text.count != textLength`, the text was truncated. |
 | `--tiers 1,2,3` | Comma-separated subset of `1,2,3`; always run in ascending order. | `1,2,3` | Capture Policy expresses itself here — e.g. `--tiers 1` when Secure Input is active or the app must never see a Clipboard Tier. |
 | `--no-enhanced-ax` | Do not set `AXEnhancedUserInterface` on Chromium/Electron apps; also disables Tier 1 retries. | enhanced AX on | Leave the default unless measuring. |
 | `--tier1-retries N` | Extra Tier 1 reads, 150 ms apart, after a failure — Chromium/Electron only. | `0` | Leave `0` (measured as a net loss). |
 
-`--out FILE` and `--help` exist but are not part of the contract (`--out` duplicates stdout to a
-file; the application persists its own records).
+`--help` exists but is not part of the contract. `--out FILE` (never part of the contract) was removed
+in migration step 4; the application persists its own records (`contextai/diagnostics.py`).
 
 ## Process behaviour
 
@@ -50,7 +50,7 @@ file; the application persists its own records).
 | --- | --- | --- |
 | `0` | A tier produced text (`tier` is 1–3, `text` present). | success |
 | `1` | Chain ran, no text (`tier` is `null`, `error` present). Not a fault. | capture failed — show the state, name the app |
-| `2` | Accessibility not granted, or the global monitor could not be installed. No JSON line. | "app not set up" state; stderr contains the host app name to grant |
+| `2` | Accessibility not granted. No JSON line. | "app not set up" state; stderr contains the host app name to grant |
 | `64` | Bad arguments. No JSON line. | programming error on the caller's side |
 
 ## The JSON line
@@ -130,3 +130,8 @@ These are measured behaviours of the chain, not bugs to work around in Swift:
 ## Change log
 
 - **v1 — 2026-09-14.** Frozen from `main` `3a76a9d`. No code change.
+- **v1, binary trimmed — 2026-09-14 (migration step 4).** `SelectionGate`, `Stats`, `Output`, monitor
+  mode and `--out` left the Swift binary for the Python package. The invocation above, the JSON line,
+  the exit codes and the process behaviour are unchanged, so the version stays 1; `--once` is accepted
+  as before. Verified by the Python client's tests and a four-app regression
+  (`_bmad-output/implementation-artifacts/regression-2026-09-14-swift-trim.jsonl`).

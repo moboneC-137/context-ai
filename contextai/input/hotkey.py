@@ -83,6 +83,10 @@ KEYCODES: dict[str, int] = {
     "f10": 109,
     "f11": 103,
     "f12": 111,
+    "left": 123,
+    "right": 124,
+    "down": 125,
+    "up": 126,
 }
 
 DEFAULT_HOTKEY = "ctrl+alt+space"
@@ -106,10 +110,11 @@ class Hotkey:
 _ALL_MODIFIERS = FLAG_SHIFT | FLAG_CONTROL | FLAG_OPTION | FLAG_COMMAND
 
 
-def parse_hotkey(spec: str) -> Hotkey:
-    """`"ctrl+alt+space"` → Hotkey. At least one modifier is required so a bare key never becomes global."""
+def parse_hotkey(spec: str, *, require_modifier: bool = True) -> Hotkey:
+    """`"ctrl+alt+space"` → Hotkey. A modifier is required for a global binding so a bare key never becomes one;
+    `require_modifier=False` is for tools that post plain keys (e.g. `esc`)."""
     parts = [p.strip().lower() for p in spec.split("+")]
-    if len(parts) < 2 or not all(parts):
+    if not all(parts) or len(parts) < (2 if require_modifier else 1):
         raise HotkeyError(f"hotkey {spec!r} must be modifier(+modifier)+key, e.g. {DEFAULT_HOTKEY!r}")
     *mods, key = parts
     modifiers = 0

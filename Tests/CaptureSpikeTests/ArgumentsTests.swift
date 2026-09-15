@@ -13,14 +13,13 @@ struct ArgumentsTests {
         return nil
     }
 
-    @Test("documented combination parses")
+    @Test("the contract's invocation parses")
     func success() throws {
-        let parsed = try parse("--out", "matrix.jsonl", "--tiers", "1,3", "--no-enhanced-ax", "--max-text", "0").get()
-        #expect(parsed.outPath == "matrix.jsonl")
+        let parsed = try parse("--once", "--max-text", "0", "--tiers", "1,3", "--no-enhanced-ax").get()
+        #expect(parsed.once == true)
         #expect(parsed.tiers == [1, 3])
         #expect(parsed.enhancedAX == false)
         #expect(parsed.maxText == 0)
-        #expect(parsed.once == false)
         #expect(parsed.help == false)
         #expect(parsed.captureOptions.tiers == [1, 3])
         #expect(parsed.captureOptions.enhancedAX == false)
@@ -32,7 +31,7 @@ struct ArgumentsTests {
         #expect(parsed.tiers == [1, 2, 3])
         #expect(parsed.enhancedAX == true)
         #expect(parsed.maxText == 200)
-        #expect(parsed.outPath == nil)
+        #expect(parsed.once == false)
         #expect(parsed.tier1Retries == 0)
         #expect(parsed.captureOptions.tier1Retries == 0)
         #expect(try parse("--once").get().once == true)
@@ -53,7 +52,7 @@ struct ArgumentsTests {
     func failures() {
         #expect(failureMessage(parse("--max-text", "-1")) == "--max-text needs a non-negative integer")
         #expect(failureMessage(parse("--max-text")) != nil)
-        #expect(failureMessage(parse("--out")) == "--out needs a file path")
+        #expect(failureMessage(parse("--out", "matrix.jsonl")) == "unknown argument: --out")  // removed in step 4
         #expect(failureMessage(parse("--tiers", "4")) == "--tiers needs a comma-separated subset of 1,2,3")
         #expect(failureMessage(parse("--tiers")) != nil)
         #expect(failureMessage(parse("--bogus")) == "unknown argument: --bogus")

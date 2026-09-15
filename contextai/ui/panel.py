@@ -131,6 +131,14 @@ class Panel:
     def visible(self) -> bool:
         return bool(self.window.isVisible())
 
+    def contains(self, point: tuple[float, float]) -> bool:
+        """Whether a screen point (NSScreen coordinates) is over the panel — gestures there are ours."""
+        frame = self.window.frame()
+        return (
+            frame.origin.x <= point[0] < frame.origin.x + frame.size.width
+            and frame.origin.y <= point[1] < frame.origin.y + frame.size.height
+        )
+
     def copy_result(self) -> None:
         """FR-16: the only path by which ContextAI writes the clipboard, and only on the user's click."""
         if isinstance(self.state, Result) and self.state.display_text:
@@ -291,12 +299,7 @@ class Panel:
     def _install_monitors(self) -> None:
         def on_mouse(event):
             point = NSEvent.mouseLocation()
-            frame = self.window.frame()
-            inside = (
-                frame.origin.x <= point.x < frame.origin.x + frame.size.width
-                and frame.origin.y <= point.y < frame.origin.y + frame.size.height
-            )
-            if not inside:
+            if not self.contains((float(point.x), float(point.y))):
                 self.on_dismiss()
             return event
 
