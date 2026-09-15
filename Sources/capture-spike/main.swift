@@ -3,6 +3,15 @@ import CaptureKit
 import Darwin
 import Foundation
 
+// The native capture primitive behind the Swift/Python contract (docs/capture-contract.md v1):
+// parse flags → trust check → run the chain once on the frontmost app → print one JSON line → let the
+// late-copy guard settle → exit. Gesture detection, statistics, persistence and everything above the
+// line live in the Python package (migration step 4, 2026-09-14).
+
+func stderr(_ message: String) {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+}
+
 // MARK: - Host application (what TCC actually attributes this process to)
 
 enum HostApp {
@@ -37,100 +46,9 @@ enum HostApp {
     }
 }
 
-// MARK: - Session
-
-@MainActor
-final class Session {
-    let arguments: Arguments
-    let output: Output
-    let chain = CaptureChain()
-    private var gate = SelectionGate()
-    private var results: [CaptureResult] = []
-    private var capturing = false
-    private var finishRequested = false
-    private var skippedWhileCapturing = 0
-    private var monitors: [Any] = []
-
-    init(arguments: Arguments, output: Output) {
-        self.arguments = arguments
-        self.output = output
-    }
-
-    func runOnce() async -> Int32 {
-        let result = await chain.capture(options: arguments.captureOptions)
-        output.emit(result.truncatingText(to: arguments.maxText).jsonLine())
-        // A Copy that lands after a clipboard tier's timeout must be reverted before this process is gone.
-        await chain.settleClipboard()
-        chain.resetEnhancedAX()
-        output.close()
-        return result.isHit ? 0 : 1
-    }
-
-    func startMonitoring() {
-        let down = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { _ in
-            let point = NSEvent.mouseLocation
-            Task { @MainActor in self.gate.mouseDown(at: point) }
-        }
-        let up = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { event in
-            let point = NSEvent.mouseLocation
-            let clicks = event.clickCount
-            Task { @MainActor in self.mouseUp(at: point, clickCount: clicks) }
-        }
-        monitors = [down, up].compactMap { $0 }
-        if monitors.count < 2 {
-            stderr("capture-spike: could not install the global mouse monitor")
-            exit(2)
-        }
-    }
-
-    private func mouseUp(at point: CGPoint, clickCount: Int) {
-        guard gate.mouseUp(at: point, clickCount: clickCount, now: .now) else { return }
-        guard !finishRequested else { return }
-        guard !capturing else { skippedWhileCapturing += 1; return }
-        capturing = true
-        Task { @MainActor in
-            let result = await chain.capture(options: arguments.captureOptions)
-            results.append(result)
-            output.emit(result.truncatingText(to: arguments.maxText).jsonLine())
-            capturing = false
-        }
-    }
-
-    /// Prints the per-app summary and terminates the process. A capture in flight is allowed to finish
-    /// (so its clipboard restore runs) and the late-copy guard to settle (at most the grace period) first;
-    /// a second signal forces the exit.
-    func finish() {
-        if finishRequested {
-            stderr("capture-spike: forced exit; the clipboard may not have been restored")
-            exit(130)
-        }
-        finishRequested = true
-        if capturing {
-            stderr("capture-spike: finishing the capture in flight…")
-        } else if chain.lateCopyGuard?.isArmed ?? false {
-            stderr("capture-spike: waiting for the clipboard to settle…")
-        }
-        Task { @MainActor in
-            while capturing { try? await Task.sleep(for: .milliseconds(20)) }
-            await chain.settleClipboard()
-            chain.resetEnhancedAX()
-            output.close()
-            stderr("")
-            stderr(Stats.renderTable(Stats.summarize(results)))
-            if skippedWhileCapturing > 0 {
-                stderr("\(skippedWhileCapturing) gesture\(skippedWhileCapturing == 1 ? "" : "s") skipped while a capture was in flight")
-            }
-            if let reverted = chain.lateCopyGuard?.restoredLateCopies, reverted > 0 {
-                stderr("\(reverted) late cop\(reverted == 1 ? "y" : "ies") reverted after a clipboard tier had finished")
-            }
-            exit(0)
-        }
-    }
-}
-
 // MARK: - Entry point
 
-// A closed stdout (e.g. `| head`) must not kill the process before the clipboard restore and summary run.
+// A closed stdout (e.g. `| head`) must not kill the process before the clipboard restore runs.
 signal(SIGPIPE, SIG_IGN)
 
 let arguments: Arguments
@@ -162,38 +80,15 @@ if !AccessibilityTrust.isTrusted() {
     exit(2)
 }
 
-let output: Output
-do {
-    output = try Output(path: arguments.outPath)
-} catch {
-    stderr("capture-spike: cannot open --out file: \(error.localizedDescription)")
-    exit(64)
+Task { @MainActor in
+    let chain = CaptureChain()
+    let result = await chain.capture(options: arguments.captureOptions)
+    // The line goes out — flushed — before the guard wait, so the caller never waits on it.
+    print(result.truncatingText(to: arguments.maxText).jsonLine())
+    fflush(stdout)
+    // A Copy that lands after a clipboard tier's timeout must be reverted before this process is gone.
+    await chain.settleClipboard()
+    chain.resetEnhancedAX()
+    exit(result.isHit ? 0 : 1)
 }
-
-let session = Session(arguments: arguments, output: output)
-
-if arguments.once {
-    Task { @MainActor in
-        let code = await session.runOnce()
-        exit(code)
-    }
-    RunLoop.main.run()
-} else {
-    // Headless: the NSApplication exists only to host the global event monitor.
-    let app = NSApplication.shared
-    app.setActivationPolicy(.prohibited)
-
-    signal(SIGINT, SIG_IGN)
-    signal(SIGTERM, SIG_IGN)
-    let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-    let sigterm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-    for source in [sigint, sigterm] {
-        source.setEventHandler { MainActor.assumeIsolated { session.finish() } }
-        source.resume()
-    }
-
-    session.startMonitoring()
-    stderr("capture-spike: listening (tiers \(arguments.tiers.map(String.init).joined(separator: ",")), enhanced AX \(arguments.enhancedAX ? "on" : "off")). Select text in any app; Ctrl-C for the summary."
-        + (arguments.outPath.map { " Appending JSON lines to \($0)." } ?? ""))
-    app.run()
-}
+RunLoop.main.run()

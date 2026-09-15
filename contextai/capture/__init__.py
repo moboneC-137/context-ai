@@ -9,6 +9,7 @@ from .client import (
     CaptureTimeout,
     UsageError,
 )
+from .gate import SelectionGate
 from .model import Bounds, BoundsSource, CaptureResult, TierAttempt
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "CaptureResult",
     "CaptureSpikeError",
     "CaptureTimeout",
+    "SelectionGate",
     "TierAttempt",
     "UsageError",
 ]

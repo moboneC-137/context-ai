@@ -2,6 +2,7 @@
 
     uv run python -m contextai.app --provider mock --target-language Chinese
     uv run python -m contextai.app --provider openai --target-language English --hotkey ctrl+alt+space
+    uv run python -m contextai.app --provider mock --target-language Chinese --auto-appear --exclude com.apple.Terminal
 
 Threading: AppKit owns the main thread. The capture spawn (~90 ms) and the provider request run on
 worker threads and hand their outcome back with `AppHelper.callAfter`; a generation counter makes a
@@ -20,7 +21,10 @@ from typing import Callable
 
 from .actions import DEFAULT_SELECTION_CAP, ActionEngine, load_templates
 from .capture import CaptureClient, CaptureOptions, CaptureOutcome
-from .input import DEFAULT_HOTKEY, HotkeyMonitor, parse_hotkey
+from .diagnostics import DEFAULT_PATH as DEFAULT_DIAGNOSTICS_PATH
+from .diagnostics import DiagnosticsLog
+from .input import DEFAULT_HOTKEY, HotkeyMonitor, SelectionMonitor, parse_hotkey
+from .policy import CapturePolicy
 from .providers import MockProvider, OpenAIProvider, Provider
 from .ui import (
     Actions,
@@ -43,13 +47,20 @@ class App:
         *,
         target_language: str,
         hotkey: str = DEFAULT_HOTKEY,
+        policy: CapturePolicy | None = None,
+        diagnostics: DiagnosticsLog | None = None,
+        auto_appear: bool = False,
         log: Callable[[str], None] = lambda line: print(line, file=sys.stderr, flush=True),
     ) -> None:
         self.client = client
         self.engine = engine
         self.target_language = target_language
         self.hotkey = parse_hotkey(hotkey)
+        self.policy = policy or CapturePolicy()
+        self.diagnostics = diagnostics
+        self.auto_appear = auto_appear
         self.log = log
+        self.skipped_gestures = 0
         self.generation = 0
         self.capturing = False
         self.selection: str | None = None
@@ -70,32 +81,52 @@ class App:
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon, never frontmost
         self.panel = Panel(on_action=self.on_action, on_retry=self.on_retry, on_dismiss=self.on_dismiss)
         HotkeyMonitor(self.hotkey, self.on_hotkey).start()
-        self.log(f"contextai: ready — press {self.hotkey.spec} on a selection (Ctrl-C here to quit)")
+        if self.auto_appear:
+            SelectionMonitor(self.on_selection_gesture).start()
+        mode = " · auto-appear on" if self.auto_appear else ""
+        self.log(f"contextai: ready — press {self.hotkey.spec} on a selection{mode} (Ctrl-C here to quit)")
         AppHelper.runEventLoop()
 
     # --- hotkey → capture -------------------------------------------------------------------------
 
     def on_hotkey(self) -> None:
-        if self.capturing:
-            self.log("contextai: hotkey ignored, capture in flight")
+        """FR-10: the universal path — works in excluded apps too."""
+        self._start_capture("hotkey", require_auto_appear=False)
+
+    def on_selection_gesture(self, point: tuple[float, float]) -> None:
+        """FR-11: a qualifying gesture from the SelectionMonitor. Ignored over our own panel (FR-11)."""
+        if self.panel is not None and self.panel.visible and self.panel.contains(point):
             return
+        self._start_capture("gesture", require_auto_appear=True)
+
+    def _start_capture(self, trigger: str, *, require_auto_appear: bool) -> None:
         from AppKit import NSEvent, NSWorkspace
 
+        front = NSWorkspace.sharedWorkspace().frontmostApplication()
+        bundle_id = front.bundleIdentifier() if front else None
+        if require_auto_appear and not self.policy.auto_appear_allowed(bundle_id):
+            return  # FR-12: excluded app, and this was not the hotkey
+        if self.capturing:
+            # FR-11: gestures during a capture are skipped and counted, never queued (this is why the
+            # miss path must fit the latency budget).
+            self.skipped_gestures += 1
+            self.log(f"contextai: {trigger} ignored, capture in flight (skipped so far: {self.skipped_gestures})")
+            return
         self.generation += 1
         generation = self.generation
         self.capturing = True
         point = NSEvent.mouseLocation()
         self.mouse = (float(point.x), float(point.y))
-        front = NSWorkspace.sharedWorkspace().frontmostApplication()
-        self.log(f"contextai: hotkey frontmost={front.bundleIdentifier() if front else None}")
-        threading.Thread(target=self._capture_worker, args=(generation,), daemon=True).start()
+        options = self.policy.options_for(bundle_id)
+        self.log(f"contextai: {trigger} frontmost={bundle_id} tiers={','.join(map(str, options.tiers))}")
+        threading.Thread(target=self._capture_worker, args=(generation, options), daemon=True).start()
 
-    def _capture_worker(self, generation: int) -> None:
+    def _capture_worker(self, generation: int, options: CaptureOptions) -> None:
         from PyObjCTools import AppHelper
 
         started = time.perf_counter()
         try:
-            outcome = self.client.capture(CaptureOptions())
+            outcome = self.client.capture(options)
         except Exception as exc:  # noqa: BLE001 — every failure becomes a panel state
             AppHelper.callAfter(self._captured, generation, None, exc, started)
         else:
@@ -111,8 +142,13 @@ class App:
             self._present(state_for_exception(exc))
             return
 
-        result = outcome.result
+        result = self.policy.interpret(outcome.result)
         self.anchor = result.bounds
+        if self.diagnostics is not None:
+            try:
+                self.diagnostics.record(outcome, result=result)
+            except OSError as err:
+                self.log(f"contextai: diagnostics not written: {err}")
         self.log(
             f"contextai: capture app={result.app} tier={result.tier} hit={result.is_hit} "
             f"swift={result.total_ms:.0f}ms spawn={outcome.spawn_ms:.0f}ms "
@@ -204,6 +240,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target-language", required=True, help="Translate target, e.g. Chinese (no default: PRD Q1)")
     parser.add_argument("--hotkey", default=DEFAULT_HOTKEY)
     parser.add_argument("--cap", type=int, default=DEFAULT_SELECTION_CAP, help="selection size cap in characters")
+    parser.add_argument(
+        "--auto-appear",
+        action="store_true",
+        help="also capture on selection gestures (drag > 3 pt, double/triple-click); off by default",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="BUNDLE_ID",
+        help="app where auto-appear never fires (repeatable); the hotkey still works there",
+    )
+    parser.add_argument(
+        "--diagnostics", type=Path, default=DEFAULT_DIAGNOSTICS_PATH, help="JSONL of per-capture metadata (never text)"
+    )
+    parser.add_argument("--no-diagnostics", action="store_true")
     args = parser.parse_args(argv)
 
     if not args.binary.exists():
@@ -214,6 +266,9 @@ def main(argv: list[str] | None = None) -> int:
         engine,
         target_language=args.target_language,
         hotkey=args.hotkey,
+        policy=CapturePolicy(excluded=frozenset(args.exclude)),
+        diagnostics=None if args.no_diagnostics else DiagnosticsLog(args.diagnostics),
+        auto_appear=args.auto_appear,
     ).run()
     return 0
 
