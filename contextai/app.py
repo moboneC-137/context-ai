@@ -1,8 +1,14 @@
 """Main loop: hotkey → capture → Panel → Action → Provider → render (docs/swift-python-split §3).
 
-    uv run python -m contextai.app --provider mock --target-language Chinese
+    uv run python -m contextai.settings set target_language Chinese   # once; then:
+    uv run python -m contextai.app --provider mock
     uv run python -m contextai.app --provider openai --target-language English --hotkey ctrl+alt+space
-    uv run python -m contextai.app --provider mock --target-language Chinese --auto-appear --exclude com.apple.Terminal
+    uv run python -m contextai.app --provider mock --auto-appear --exclude com.apple.Terminal
+
+Every flag is optional and overrides the settings file (`contextai.settings`: `--settings PATH` >
+`$CONTEXTAI_SETTINGS` > `~/Library/Application Support/ContextAI/settings.toml`); `--exclude` adds to
+the file's `excluded_apps`. The target language has no default: it must come from the file or the
+flag, else exit 2 (PRD FR-25 / Open Question 1).
 
 Threading: AppKit owns the main thread. The capture spawn (~90 ms) and the provider request run on
 worker threads and hand their outcome back with `AppHelper.callAfter`; a generation counter makes a
@@ -21,11 +27,11 @@ from typing import Callable
 
 from .actions import DEFAULT_SELECTION_CAP, ActionEngine, load_templates
 from .capture import CaptureClient, CaptureOptions, CaptureOutcome
-from .diagnostics import DEFAULT_PATH as DEFAULT_DIAGNOSTICS_PATH
 from .diagnostics import DiagnosticsLog
 from .input import DEFAULT_HOTKEY, HotkeyMonitor, SelectionMonitor, parse_hotkey
 from .policy import CapturePolicy
 from .providers import MockProvider, OpenAIProvider, Provider
+from .settings import MISSING_LANGUAGE_MESSAGE, PROVIDERS, SettingsError, effective, load, resolve_path
 from .ui import (
     Actions,
     Loading,
@@ -235,40 +241,65 @@ def build_provider(name: str, model: str | None) -> Provider:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--binary", type=Path, default=DEFAULT_BINARY, help="path to capture-spike")
-    parser.add_argument("--provider", choices=["mock", "openai"], default="mock")
-    parser.add_argument("--model", help="provider model identifier (openai only)")
-    parser.add_argument("--target-language", required=True, help="Translate target, e.g. Chinese (no default: PRD Q1)")
-    parser.add_argument("--hotkey", default=DEFAULT_HOTKEY)
-    parser.add_argument("--cap", type=int, default=DEFAULT_SELECTION_CAP, help="selection size cap in characters")
+    parser.add_argument("--settings", type=Path, default=None, metavar="PATH", help="settings file to use")
+    # Every setting flag defaults to None: omitted ≠ given, so the file value survives (settings.effective).
+    parser.add_argument("--provider", choices=list(PROVIDERS), default=None, help="default: mock")
+    parser.add_argument("--model", default=None, help="provider model identifier (openai only)")
+    parser.add_argument("--target-language", default=None, help="Translate target, e.g. Chinese (no default: PRD Q1)")
+    parser.add_argument("--hotkey", default=None, help=f"default: {DEFAULT_HOTKEY}")
+    parser.add_argument(
+        "--cap", type=int, default=None, help=f"selection size cap in characters (default: {DEFAULT_SELECTION_CAP})"
+    )
     parser.add_argument(
         "--auto-appear",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="also capture on selection gestures (drag > 3 pt, double/triple-click); off by default",
     )
     parser.add_argument(
         "--exclude",
         action="append",
-        default=[],
+        default=None,
         metavar="BUNDLE_ID",
-        help="app where auto-appear never fires (repeatable); the hotkey still works there",
+        help="app where auto-appear never fires (repeatable, adds to the file's list); the hotkey still works there",
     )
-    parser.add_argument(
-        "--diagnostics", type=Path, default=DEFAULT_DIAGNOSTICS_PATH, help="JSONL of per-capture metadata (never text)"
-    )
+    parser.add_argument("--diagnostics", type=Path, default=None, help="JSONL of per-capture metadata (never text)")
     parser.add_argument("--no-diagnostics", action="store_true")
     args = parser.parse_args(argv)
 
+    try:
+        config = effective(
+            load(resolve_path(args.settings)),
+            target_language=args.target_language,
+            provider=args.provider,
+            model=args.model,
+            hotkey=args.hotkey,
+            auto_appear=args.auto_appear,
+            exclude=args.exclude or (),
+            diagnostics=args.diagnostics,
+            no_diagnostics=args.no_diagnostics,
+            selection_cap=args.cap,
+        )
+    except SettingsError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    if config.target_language is None:
+        print(MISSING_LANGUAGE_MESSAGE, file=sys.stderr)
+        return 2
+
     if not args.binary.exists():
         parser.error(f"capture-spike not found at {args.binary}; run `swift build -c release` first")
-    engine = ActionEngine(build_provider(args.provider, args.model), load_templates(), selection_cap=args.cap)
+    engine = ActionEngine(
+        build_provider(config.provider, config.model), load_templates(), selection_cap=config.selection_cap
+    )
     App(
         CaptureClient.for_binary(args.binary),
         engine,
-        target_language=args.target_language,
-        hotkey=args.hotkey,
-        policy=CapturePolicy(excluded=frozenset(args.exclude)),
-        diagnostics=None if args.no_diagnostics else DiagnosticsLog(args.diagnostics),
-        auto_appear=args.auto_appear,
+        target_language=config.target_language,
+        hotkey=config.hotkey,
+        policy=CapturePolicy(excluded=config.excluded_apps),
+        diagnostics=None if config.diagnostics_path is None else DiagnosticsLog(config.diagnostics_path),
+        auto_appear=config.auto_appear,
     ).run()
     return 0
 
