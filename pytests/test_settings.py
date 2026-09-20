@@ -170,7 +170,7 @@ def test_load_accepts_utf8_bom(tmp_path):
 def test_hotkey_message_does_not_repeat_itself():
     with pytest.raises(SettingsError) as info:
         validate({"hotkey": "space"})
-    assert info.value.problems == [f"hotkey: expected modifier(+modifier)+key, e.g. {DEFAULT_HOTKEY!r}"]
+    assert info.value.problems == [f"hotkey: expected modifier(+modifier)+key with ctrl, alt or cmd, e.g. {DEFAULT_HOTKEY!r}"]
 
 
 def test_validate_accepts_typed_values():
@@ -480,3 +480,11 @@ def test_cli_show_on_bad_file_exits_2(settings_file, capsys):
     assert mod.main(["show"]) == 2
     err = capsys.readouterr().err
     assert "api_key" in err and "SECRET" not in err
+
+
+def test_shift_only_hotkey_is_rejected_with_the_reason(tmp_path):
+    path = write(tmp_path / "s.toml", 'hotkey = "shift+a"\n')
+    with pytest.raises(SettingsError) as info:
+        load(path)
+    (problem,) = info.value.problems
+    assert problem.startswith("hotkey: expected ") and "ctrl, alt or cmd" in problem

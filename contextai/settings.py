@@ -147,7 +147,7 @@ def _problems(values: Mapping[str, Any]) -> list[str]:
                 try:
                     parse_hotkey(value)
                 except HotkeyError:
-                    problems.append(f"{key}: expected modifier(+modifier)+key, e.g. {DEFAULT_HOTKEY!r}")
+                    problems.append(f"{key}: expected modifier(+modifier)+key with ctrl, alt or cmd, e.g. {DEFAULT_HOTKEY!r}")
         elif key in ("auto_appear", "diagnostics"):
             if not isinstance(value, bool):
                 problems.append(f"{key}: expected true or false")

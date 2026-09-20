@@ -59,7 +59,7 @@ uv run python -m contextai.settings set target_language Chinese                 
 uv run python -m contextai.app --provider mock                                    # the app (v0 demo)
 ```
 
-Running the app: it lives in the terminal (no Dock icon), waits for **⌃⌥Space** (`--hotkey` to change),
+Running the app: it lives in the terminal (no Dock icon), waits for **⌃⌥Space** (`--hotkey` to change; a binding needs ctrl, alt or cmd — shift alone is not accepted),
 captures the current selection, and shows a floating panel with Summarize / Translate beside it.
 Esc or a click outside dismisses it; Copy is the only way it writes the clipboard. A target language is
 required on purpose — there is no default — but it only has to be set *somewhere*: in the settings file
