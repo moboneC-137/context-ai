@@ -13,6 +13,14 @@ from typing import Any, Mapping
 
 CONTRACT_VERSION = 1
 
+# `error` values that mean "the user selected nothing". `NO_SELECTION_ERROR` is Swift's Edit > Copy gate
+# (contract v1); `POLICY_EMPTY_ERROR` is written on the Python side when the Capture Policy downgrades a
+# line-copying editor's whole-line Clipboard-Tier hit (FR-7). Both live here, on the result model, so the
+# policy that writes them and the panel state map that reads them share one vocabulary.
+NO_SELECTION_ERROR = "no-selection"
+POLICY_EMPTY_ERROR = "policy-empty-selection"
+NOTHING_SELECTED_ERRORS: frozenset[str] = frozenset({NO_SELECTION_ERROR, POLICY_EMPTY_ERROR})
+
 
 class BoundsSource(str, Enum):
     """Where `bounds` came from, best first."""

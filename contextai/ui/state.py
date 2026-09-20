@@ -13,6 +13,7 @@ from typing import Union
 
 from ..actions import ActionEngineError, ActionResult, MissingParameter
 from ..capture import (
+    NOTHING_SELECTED_ERRORS,
     AccessibilityNotGranted,
     CaptureResult,
     CaptureSpikeError,
@@ -89,7 +90,9 @@ PanelState = Union[Actions, Loading, Result, Error]
 
 def state_for_capture_miss(result: CaptureResult) -> Error:
     """A parsed JSON line with no text (exit 1): distinguish "nothing selected" from "could not read"."""
-    if result.error == "no-selection":
+    # Swift's Edit > Copy gate, or the Capture Policy's downgrade of a line-copying editor's whole-line
+    # Clipboard-Tier hit (FR-7) — both are treated as "nothing selected" (see contextai.capture.model).
+    if result.error in NOTHING_SELECTED_ERRORS:
         return Error(ErrorKind.NOTHING_SELECTED, "Nothing is selected.")
     if result.error == "no-frontmost-app":
         return Error(ErrorKind.CAPTURE_FAILED, "No application is in front.")

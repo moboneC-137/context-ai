@@ -14,13 +14,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Mapping
 
-from .capture import CaptureOptions, CaptureResult
+from .capture import POLICY_EMPTY_ERROR, CaptureOptions, CaptureResult
 
 LINE_COPYING_EDITORS: frozenset[str] = frozenset(
     {"com.microsoft.VSCode", "com.jetbrains.intellij", "com.jetbrains.intellij.ce"}
 )
-POLICY_EMPTY_ERROR = "policy-empty-selection"
-"""`error` value the policy writes when it downgrades a Clipboard-Tier hit to a miss (rule 1)."""
+# `POLICY_EMPTY_ERROR` (the `error` value rule 1 writes) is defined on the result model, `contextai.capture`,
+# so the panel state map can read it without depending on this module.
 
 
 @dataclass(frozen=True)
