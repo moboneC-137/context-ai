@@ -202,7 +202,13 @@ Two things to keep in mind while gathering data:
   you should expect in the data.
 
 Press **Ctrl-C** in the app's terminal when done; a capture in flight finishes first (so the clipboard is
-restored).
+restored). Two things make that true: `capture-spike` runs in its own session, so the terminal's SIGINT
+never reaches it, and the application delegate runs an orderly stop (`App.stop()`) that waits for the
+child to leave its late-copy guard window before the process exits — ~2 s in the common case, a few
+seconds at worst (a capture that has not yet answered is joined first, up to about twice the 3 s
+first-line timeout, then the ≤ 2 s guard wait). A child that never produced a line by then is the one
+thing that gets killed. `kill <pid>` (SIGTERM) takes the same path. A second Ctrl-C during the stop is
+swallowed by the interrupt handler — just wait it out.
 
 The binary on its own, for scripted measurements (it runs the chain immediately on whatever app is
 frontmost, so give another app focus and a selection first):

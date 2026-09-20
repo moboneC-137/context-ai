@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -23,16 +25,30 @@ FAKE = Path(__file__).with_name("fake_capture_spike.py")
 
 @pytest.fixture
 def fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Returns a factory: fake(mode, linger=0) -> (client, args_file, marker_file)."""
+    """Returns a factory: fake(mode, linger=0, ...) -> (client, args_file, marker_file)."""
 
-    def make(mode: str = "hit", linger: float = 0.0, *, first_line_timeout: float = 3.0):
+    def make(
+        mode: str = "hit",
+        linger: float = 0.0,
+        *,
+        delay_line: float = 0.0,
+        hang: bool = False,
+        first_line_timeout: float = 3.0,
+        no_line_kill_after: float = 10.0,
+    ):
         args_file = tmp_path / f"{mode}.args"
         marker = tmp_path / f"{mode}.marker"
         monkeypatch.setenv("FAKE_MODE", mode)
         monkeypatch.setenv("FAKE_LINGER", str(linger))
+        monkeypatch.setenv("FAKE_DELAY_LINE", str(delay_line))
+        monkeypatch.setenv("FAKE_HANG", "1" if hang else "")
         monkeypatch.setenv("FAKE_ARGS", str(args_file))
         monkeypatch.setenv("FAKE_MARKER", str(marker))
-        client = CaptureClient([sys.executable, str(FAKE)], first_line_timeout=first_line_timeout)
+        client = CaptureClient(
+            [sys.executable, str(FAKE)],
+            first_line_timeout=first_line_timeout,
+            no_line_kill_after=no_line_kill_after,
+        )
         return client, args_file, marker
 
     return make
@@ -154,13 +170,106 @@ def test_exit_64_raises_usage_error(fake):
         client.capture()
 
 
-def test_no_line_timeout_kills_and_raises(fake):
-    client, _, marker = fake("hang", first_line_timeout=0.3)
+def test_no_line_hang_raises_at_once_and_kills_only_at_the_deadline(fake):
+    client, _, marker = fake("hit", hang=True, first_line_timeout=0.3, no_line_kill_after=0.5)
     started = time.perf_counter()
-    with pytest.raises(CaptureTimeout):
+    with pytest.raises(CaptureTimeout) as excinfo:
         client.capture()
-    assert time.perf_counter() - started < 2.0
-    assert not marker.exists()  # killed: the only case where killing is allowed
+    raised_after = time.perf_counter() - started
+    assert 0.2 < raised_after < 1.0, f"CaptureTimeout must be raised at the timeout, not the kill ({raised_after:.2f}s)"
+
+    handle = excinfo.value.handle
+    assert handle is not None and not excinfo.value.settled
+    code = excinfo.value.wait_settled(3.0)
+    assert code is not None and code != 0  # killed: the only case where killing is allowed
+    assert handle.killed
+    assert excinfo.value.settled
+    assert not marker.exists()
+    assert time.perf_counter() - started < 2.5
+
+
+def test_no_line_late_line_is_never_killed(fake):
+    # A slow tier that answers after the caller's deadline: the caller sees the timeout, the child
+    # finishes its restore and exits naturally.
+    client, _, marker = fake("hit", delay_line=0.6, first_line_timeout=0.3)
+    started = time.perf_counter()
+    with pytest.raises(CaptureTimeout) as excinfo:
+        client.capture()
+    raised_after = time.perf_counter() - started
+    assert 0.2 < raised_after < 0.55, f"CaptureTimeout raised at {raised_after:.2f}s, expected ~0.3s"
+    assert excinfo.value.handle is not None
+
+    assert excinfo.value.handle.wait_settled(2.0) is not None
+    assert marker.exists(), "marker is written only on a natural exit — the late-line child was killed"
+    assert not excinfo.value.handle.killed
+    assert excinfo.value.wait_settled(0) == 0
+
+
+def test_no_line_late_eof_is_never_killed(fake):
+    # The trust check answers after the caller's deadline with exit 2 and no line: EOF, not a line,
+    # and still not a kill — the handle settles with the real exit code and stderr.
+    client, _, _ = fake("exit2", delay_line=0.6, first_line_timeout=0.3, no_line_kill_after=1.0)
+    with pytest.raises(CaptureTimeout) as excinfo:
+        client.capture()
+    handle = excinfo.value.handle
+    assert handle is not None
+    assert handle.wait_settled(2.0) == 2
+    assert not handle.killed
+    assert not handle.line_seen
+    assert "Visual Studio Code" in handle.stderr
+
+
+def test_garbage_line_hands_back_the_child(fake):
+    client, _, marker = fake("garbage", linger=0.3)
+    with pytest.raises(CaptureSpikeError) as excinfo:
+        client.capture()
+    exc = excinfo.value
+    assert exc.handle is not None and not exc.settled  # still in its guard window: hold it
+    assert exc.wait_settled(2.0) == 0
+    assert marker.exists() and not exc.handle.killed
+
+
+def test_kill_if_silent_leaves_a_child_that_has_spoken_alone(fake):
+    client, _, marker = fake("hit", linger=0.3)
+    outcome = client.capture()
+    outcome._reaper.kill_if_silent()  # normal path: the line was read, so this is a no-op
+    assert outcome.wait_settled(2.0) == 0
+    assert marker.exists() and not outcome._reaper.killed
+
+
+def test_kill_if_silent_kills_a_silent_child(fake):
+    client, _, marker = fake("hit", hang=True, first_line_timeout=0.2, no_line_kill_after=30.0)
+    with pytest.raises(CaptureTimeout) as excinfo:
+        client.capture()
+    handle = excinfo.value.handle
+    handle.kill_if_silent()
+    assert handle.wait_settled(2.0) is not None
+    assert handle.killed and not handle.line_seen and not marker.exists()
+
+
+@pytest.mark.parametrize("kwargs", [{"first_line_timeout": 0}, {"first_line_timeout": -1}, {"no_line_kill_after": -0.1}])
+def test_timeouts_are_validated(kwargs):
+    with pytest.raises(ValueError):
+        CaptureClient([sys.executable, str(FAKE)], **kwargs)
+
+
+def test_timeout_without_a_handle_is_settled():
+    exc = CaptureTimeout("no line")
+    assert exc.handle is None
+    assert exc.settled
+    assert exc.wait_settled() is None
+
+
+# --- Session isolation: a terminal Ctrl-C (SIGINT to the foreground group) never reaches the child --
+
+
+def test_child_runs_in_its_own_session(fake):
+    client, _, _ = fake("hit")
+    outcome = client.capture()
+    assert outcome.wait_settled(3.0) == 0
+    match = re.search(r"^sid=(\d+)$", outcome.stderr, re.MULTILINE)
+    assert match, outcome.stderr
+    assert int(match.group(1)) != os.getsid(0)
 
 
 def test_garbage_line_is_a_contract_violation(fake):

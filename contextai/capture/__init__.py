@@ -1,6 +1,7 @@
 """Client for the Swift `capture-spike` binary — the single Swift/Python boundary (docs/capture-contract.md v1)."""
 
 from .client import (
+    SETTLE_TIMEOUT_SECONDS,
     AccessibilityNotGranted,
     CaptureClient,
     CaptureOptions,
@@ -24,6 +25,7 @@ __all__ = [
     "NO_SELECTION_ERROR",
     "NOTHING_SELECTED_ERRORS",
     "POLICY_EMPTY_ERROR",
+    "SETTLE_TIMEOUT_SECONDS",
     "AccessibilityNotGranted",
     "Bounds",
     "BoundsSource",
