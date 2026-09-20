@@ -14,11 +14,19 @@ Threading: AppKit owns the main thread. The capture spawn (~90 ms) and the provi
 worker threads and hand their outcome back with `AppHelper.callAfter`; a generation counter makes a
 result that arrives after Esc (or after a newer hotkey press) a no-op (FR-14). Diagnostics printed
 here are metadata only — never the selection or the result (NFR-4).
+
+Clipboard safety across the boundary (docs/capture-contract.md, "Process behaviour"): `capturing`
+stays true until the child that last owned the pasteboard has *settled* — not merely answered — so a
+second `capture-spike` is never spawned while the first may still revert a late copy. That hold is
+tied to the child alone: neither Esc nor a newer generation releases it. A `CaptureTimeout` carries
+the still-running child's handle and is held the same way. Ctrl-C: the child lives in its own session
+(never signalled) and the application delegate runs `stop()`, which waits (bounded) for the child.
 """
 
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 import threading
 import time
@@ -26,7 +34,7 @@ from pathlib import Path
 from typing import Callable
 
 from .actions import DEFAULT_SELECTION_CAP, ActionEngine, load_templates
-from .capture import CaptureClient, CaptureOptions, CaptureOutcome
+from .capture import SETTLE_TIMEOUT_SECONDS, CaptureClient, CaptureOptions, CaptureOutcome, CaptureSpikeError
 from .diagnostics import DiagnosticsLog
 from .input import DEFAULT_HOTKEY, HotkeyMonitor, SelectionMonitor, parse_hotkey
 from .policy import CapturePolicy
@@ -43,6 +51,16 @@ from .ui import (
 )
 
 DEFAULT_BINARY = Path(__file__).resolve().parents[1] / ".build" / "release" / "capture-spike"
+
+# `stop()` waits this long, at most, for a child past its first line to leave its guard window.
+STOP_SETTLE_TIMEOUT = SETTLE_TIMEOUT_SECONDS
+
+
+def _call_after(fn: Callable[..., None], *args) -> None:
+    """Run `fn(*args)` on the main thread from a worker. Tests patch this to run synchronously."""
+    from PyObjCTools import AppHelper
+
+    AppHelper.callAfter(fn, *args)
 
 
 class App:
@@ -74,24 +92,95 @@ class App:
         self.anchor = None  # Bounds | None from the last capture
         self.mouse: tuple[float, float] = (0.0, 0.0)
         self.panel = None  # created lazily on the main thread, inside run()
+        self.hotkey_monitor: HotkeyMonitor | None = None
+        self.selection_monitor: SelectionMonitor | None = None
+        self._delegate = None  # NSApplication delegate, retained for the life of the run loop
+        self._worker: threading.Thread | None = None  # the in-flight capture worker
+        # The child that last owned the pasteboard (a CaptureOutcome, or a CaptureSpikeError carrying
+        # a handle), from the worker's return until it has settled; None otherwise.
+        self._pending: CaptureOutcome | CaptureSpikeError | None = None
+        self._settling = False  # True between the child's answer and its settle (for the skip log)
 
     # --- lifecycle --------------------------------------------------------------------------------
 
     def run(self) -> None:
-        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSObject, NSTerminateNow
         from PyObjCTools import AppHelper
 
         from .ui.panel import Panel
 
+        stop = self.stop
+        log = self.log
+
+        class ContextAIAppDelegate(NSObject):
+            # Ctrl-C ends in `NSApp.terminate_` (PyObjC's Mach interrupt handler), which calls this on
+            # the main thread and then exits the process: nothing after `runEventLoop` ever runs, so
+            # the orderly stop lives here. Queued `callAfter` callbacks will never fire at this point;
+            # `stop()` waits on the child directly.
+            def applicationShouldTerminate_(self, sender):
+                log("contextai: terminate requested — stopping (a capture in flight finishes first)")
+                try:
+                    stop()
+                except Exception:  # noqa: BLE001 — never let a Python error escape into the ObjC call
+                    import traceback
+
+                    log("contextai: stop failed\n" + traceback.format_exc().rstrip())
+                return NSTerminateNow
+
         app = NSApplication.sharedApplication()
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon, never frontmost
+        self._delegate = ContextAIAppDelegate.alloc().init()
+        app.setDelegate_(self._delegate)
         self.panel = Panel(on_action=self.on_action, on_retry=self.on_retry, on_dismiss=self.on_dismiss)
-        HotkeyMonitor(self.hotkey, self.on_hotkey, log=self.log).start()
+        self.hotkey_monitor = HotkeyMonitor(self.hotkey, self.on_hotkey, log=self.log)
+        self.hotkey_monitor.start()
         if self.auto_appear:
-            SelectionMonitor(self.on_selection_gesture).start()
+            self.selection_monitor = SelectionMonitor(self.on_selection_gesture)
+            self.selection_monitor.start()
         mode = " · auto-appear on" if self.auto_appear else ""
         self.log(f"contextai: ready — press {self.hotkey.spec} on a selection{mode} (Ctrl-C here to quit)")
-        AppHelper.runEventLoop()
+        # Route SIGINT through a Mach port so it is handled while the run loop is idle (Python's own
+        # handler only runs when Python code does). Installed explicitly: `runEventLoop(installInterrupt=
+        # True)` skips it whenever `sharedApplication()` already exists, as it does here. The handler
+        # ends in `NSApp.terminate_` → the delegate above → `exit()`. SIGTERM (`kill <pid>`, an IDE's
+        # stop button) takes the same road.
+        from PyObjCTools import MachSignals
+
+        AppHelper.installMachInterrupt()
+        MachSignals.signal(signal.SIGTERM, AppHelper.machInterrupt)
+        try:
+            AppHelper.runEventLoop()
+        finally:
+            self.stop()  # the exception path; the Ctrl-C path went through the delegate
+
+    def stop(self) -> None:
+        """Orderly shutdown: no new captures, monitors off, panel gone, the child's restore finished.
+
+        Framework-free and idempotent. Joins the in-flight worker (`capture()` can take up to about
+        2 × `first_line_timeout` on its EOF path), then waits up to `STOP_SETTLE_TIMEOUT` for the child
+        that last owned the pasteboard: ~2 s in the common case, a few seconds at worst. A child that
+        has produced a line is never killed. A child still silent after that wait is killed — the one
+        kill the contract allows — because the reaper that would do it later dies with this process
+        and the child, in its own session, would otherwise be orphaned.
+        """
+        self.generation += 1  # a later _captured presents nothing (release still runs); _finished is a no-op
+        if self.hotkey_monitor is not None:
+            self.hotkey_monitor.stop()
+            self.hotkey_monitor = None
+        if self.selection_monitor is not None:
+            self.selection_monitor.stop()
+            self.selection_monitor = None
+        if self.panel is not None and self.panel.visible:
+            self.panel.dismiss()
+        worker = self._worker
+        if worker is not None and worker.is_alive():
+            worker.join(2 * self.client.first_line_timeout + 1.0)
+        pending = self._pending
+        if pending is not None and not pending.settled:
+            pending.wait_settled(STOP_SETTLE_TIMEOUT)
+            handle = getattr(pending, "handle", None)
+            if handle is not None and not handle.settled and not handle.line_seen:
+                handle.kill_if_silent()
 
     # --- hotkey → capture -------------------------------------------------------------------------
 
@@ -110,36 +199,75 @@ class App:
 
         front = NSWorkspace.sharedWorkspace().frontmostApplication()
         bundle_id = front.bundleIdentifier() if front else None
+        point = NSEvent.mouseLocation()
+        self._begin_capture(
+            trigger, bundle_id, (float(point.x), float(point.y)), require_auto_appear=require_auto_appear
+        )
+
+    def _begin_capture(
+        self,
+        trigger: str,
+        bundle_id: str | None,
+        point: tuple[float, float],
+        *,
+        require_auto_appear: bool = False,
+    ) -> None:
+        """FR-11/FR-12 gate plus the spawn; framework-free so the whole flow is testable without AppKit."""
         if require_auto_appear and not self.policy.auto_appear_allowed(bundle_id):
             return  # FR-12: excluded app, and this was not the hotkey
         if self.capturing:
             # FR-11: gestures during a capture are skipped and counted, never queued (this is why the
-            # miss path must fit the latency budget).
+            # miss path must fit the latency budget). "Settling" = the child has answered but may still
+            # own the pasteboard (late-copy guard); spawning now would let it revert the next copy.
             self.skipped_gestures += 1
-            self.log(f"contextai: {trigger} ignored, capture in flight (skipped so far: {self.skipped_gestures})")
+            why = "child still settling" if self._settling else "capture in flight"
+            self.log(f"contextai: {trigger} ignored, {why} (skipped so far: {self.skipped_gestures})")
             return
         self.generation += 1
         generation = self.generation
         self.capturing = True
-        point = NSEvent.mouseLocation()
-        self.mouse = (float(point.x), float(point.y))
+        self._settling = False
+        self._pending = None
+        self.mouse = point
         options = self.policy.options_for(bundle_id)
         self.log(f"contextai: {trigger} frontmost={bundle_id} tiers={','.join(map(str, options.tiers))}")
-        threading.Thread(target=self._capture_worker, args=(generation, options), daemon=True).start()
+        self._worker = threading.Thread(target=self._capture_worker, args=(generation, options), daemon=True)
+        self._worker.start()
 
     def _capture_worker(self, generation: int, options: CaptureOptions) -> None:
-        from PyObjCTools import AppHelper
-
         started = time.perf_counter()
         try:
             outcome = self.client.capture(options)
         except Exception as exc:  # noqa: BLE001 — every failure becomes a panel state
-            AppHelper.callAfter(self._captured, generation, None, exc, started)
+            # A timeout or a garbage line carries the still-running child; `stop()` reads it here
+            # directly because a `callAfter` queued during termination never runs.
+            self._pending = exc if getattr(exc, "handle", None) is not None else None
+            _call_after(self._captured, generation, None, exc, started)
         else:
-            AppHelper.callAfter(self._captured, generation, outcome, None, started)
+            self._pending = outcome
+            _call_after(self._captured, generation, outcome, None, started)
 
-    def _captured(self, generation: int, outcome: CaptureOutcome | None, exc: Exception | None, started: float) -> None:
-        self.capturing = False
+    def _captured(
+        self, generation: int, outcome: CaptureOutcome | None, exc: Exception | None, started: float
+    ) -> None:
+        # Release first, whatever happens below: `capturing` is tied to the child, never to the panel
+        # or to the generation, and must not stay stuck if presenting raises.
+        if outcome is not None:
+            self._schedule_release(outcome)
+        elif isinstance(exc, CaptureSpikeError) and exc.handle is not None:
+            self._schedule_release(exc)
+        else:
+            self._release()
+        try:
+            self._show_capture(generation, outcome, exc, started)
+        except Exception:  # noqa: BLE001 — a presentation failure must not take the app down
+            import traceback
+
+            self.log("contextai: capture handling failed\n" + traceback.format_exc().rstrip())
+
+    def _show_capture(
+        self, generation: int, outcome: CaptureOutcome | None, exc: Exception | None, started: float
+    ) -> None:
         if generation != self.generation:
             return
         if exc is not None or outcome is None:
@@ -166,6 +294,34 @@ class App:
         self.selection = result.text
         self._present(Actions(selection=result.text or "", app=result.app, tier=result.tier))
 
+    def _schedule_release(self, pending: CaptureOutcome | CaptureSpikeError) -> None:
+        """Release `capturing` on the main thread once the child behind `pending` has exited."""
+        self._pending = pending
+        if pending.settled:
+            self._release()  # Tier 1 / no-selection: the child is already gone
+            return
+        self._settling = True
+
+        def settle() -> None:
+            code = pending.wait_settled(timeout=None)
+            if isinstance(pending, CaptureSpikeError):
+                # The failed path's resolution is otherwise invisible: say how the late child ended
+                # (metadata only — never its line).
+                handle = pending.handle
+                line = f"contextai: late child settled exit={code} killed={handle.killed} line_seen={handle.line_seen}"
+                if not handle.line_seen and handle.stderr.strip():
+                    line += f" stderr={handle.stderr.strip().splitlines()[0]!r}"
+                self.log(line)
+            _call_after(self._release)
+
+        threading.Thread(target=settle, name="contextai-settle", daemon=True).start()
+
+    def _release(self) -> None:
+        """The child that owned the pasteboard is gone: a new capture may spawn."""
+        self.capturing = False
+        self._settling = False
+        self._pending = None
+
     # --- action → provider ------------------------------------------------------------------------
 
     def on_action(self, action: str) -> None:
@@ -179,14 +335,12 @@ class App:
         threading.Thread(target=self._action_worker, args=(generation, action, selection), daemon=True).start()
 
     def _action_worker(self, generation: int, action: str, selection: str) -> None:
-        from PyObjCTools import AppHelper
-
         try:
             result = self.engine.run(action, selection, {"target_language": self.target_language})
         except Exception as exc:  # noqa: BLE001
-            AppHelper.callAfter(self._finished, generation, action, selection, None, exc)
+            _call_after(self._finished, generation, action, selection, None, exc)
         else:
-            AppHelper.callAfter(self._finished, generation, action, selection, result, None)
+            _call_after(self._finished, generation, action, selection, result, None)
 
     def _finished(self, generation: int, action: str, selection: str, result, exc) -> None:
         if generation != self.generation or self.panel is None or not self.panel.visible:

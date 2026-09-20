@@ -37,6 +37,11 @@ in migration step 4; the application persists its own records (`contextai/diagno
   - Read the line as soon as it arrives and proceed; do not wait on exit for the result.
   - **Never kill the process** after reading the line — that defeats the clipboard restore. Let it
     finish in the background; it always terminates within the guard window.
+  - *Caller note (Python client).* On a **no-line** timeout the client reports the timeout at once
+    but does not kill: it waits a documented grace (`no_line_kill_after`, 10 s) and kills only if
+    there is *still* no line by then — a chain that a slow app stretched past the caller's deadline
+    keeps its restore. The child runs in its own session so the caller's terminal signals never
+    reach it. No Swift-side change; version unchanged.
 - **stderr is for humans.** Status text only; nothing on stderr is machine-parsed. Pass it through
   to logs or discard it.
 - **Frontmost app is whatever is frontmost at spawn time.** The caller is responsible for not

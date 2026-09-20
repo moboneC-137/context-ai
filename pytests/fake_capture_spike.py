@@ -4,10 +4,14 @@ Reproduces the contract's process behaviour so the client can be tested without 
 one flushed JSON line, then an optional linger (the late-copy guard window) before exit; or the
 no-line exits (2, 64); or a hang.
 
-  FAKE_MODE      hit | miss | no-selection | exit2 | exit2-foreign | exit64 | hang | garbage   (default: hit)
-  FAKE_LINGER    seconds to stay alive after writing the line (default: 0)
-  FAKE_ARGS      file to write argv[1:] into, one per line
-  FAKE_MARKER    file to create just before a *natural* exit (never created if killed)
+  FAKE_MODE        hit | miss | no-selection | exit2 | exit2-foreign | exit64 | garbage   (default: hit)
+  FAKE_LINGER      seconds to stay alive after writing the line (default: 0)
+  FAKE_DELAY_LINE  seconds to wait before writing the line, or before a no-line exit (default: 0)
+  FAKE_HANG        if set, never write a line and never exit (until killed)
+  FAKE_ARGS        file to write argv[1:] into, one per line
+  FAKE_MARKER      file to create just before a *natural* exit (never created if killed)
+
+Always prints `sid=<session id>` on stderr first, so a caller can check session isolation.
 """
 
 import json
@@ -22,7 +26,12 @@ if ARGS_FILE:
 
 MODE = os.environ.get("FAKE_MODE", "hit")
 LINGER = float(os.environ.get("FAKE_LINGER", "0"))
+DELAY_LINE = float(os.environ.get("FAKE_DELAY_LINE", "0"))
+HANG = bool(os.environ.get("FAKE_HANG"))
 MARKER = os.environ.get("FAKE_MARKER")
+
+sys.stderr.write(f"sid={os.getsid(0)}\n")
+sys.stderr.flush()
 
 HIT = {
     "app": "com.apple.Notes",
@@ -71,6 +80,11 @@ def finish(code: int) -> None:
     sys.exit(code)
 
 
+if HANG:
+    while True:  # only a signal ends this
+        time.sleep(3600)
+if DELAY_LINE:
+    time.sleep(DELAY_LINE)  # a slow tier, or a slow trust check
 if MODE == "exit2":
     sys.stderr.write(
         "capture-spike: Accessibility access is not granted.\n"
@@ -87,9 +101,6 @@ if MODE == "exit2-foreign":
 if MODE == "exit64":
     sys.stderr.write("capture-spike: unknown argument: --bogus\nusage: capture-spike ...\n")
     sys.exit(64)
-if MODE == "hang":
-    time.sleep(30)
-    sys.exit(0)
 if MODE == "garbage":
     sys.stdout.write("this is not json\n")
     sys.stdout.flush()
