@@ -8,12 +8,14 @@ import pytest
 
 from contextai.actions import ActionEngine, MissingParameter, load_templates
 from contextai.capture import (
+    POLICY_EMPTY_ERROR,
     AccessibilityNotGranted,
     CaptureResult,
     CaptureSpikeError,
     CaptureTimeout,
     TierAttempt,
 )
+from contextai.policy import CapturePolicy
 from contextai.providers import (
     APIError,
     MockProvider,
@@ -57,6 +59,27 @@ def test_capture_miss_states():
     assert "com.apple.Safari" in failed.message and "tier 2: no-change" in failed.message
     assert "support-tier table" in failed.message
     assert not failed.retryable
+
+
+def test_line_copying_editor_whole_line_hit_is_reported_as_nothing_selected():
+    """FR-7: a Tier 2 hit after Tier 1 `empty` in a line-copying editor is the editor copying the current
+    line, not a selection. The policy downgrades it; the panel must say "Nothing is selected.", not that the
+    capture failed."""
+    whole_line = CaptureResult(
+        ts=TS,
+        app="com.microsoft.VSCode",
+        tier=2,
+        secure_input=False,
+        attempts=(TierAttempt(1, False, 2.0, error="empty"), TierAttempt(2, True, 28.0)),
+        total_ms=30.0,
+        text="the whole line",
+        text_length=14,
+    )
+    downgraded = CapturePolicy().interpret(whole_line)
+    assert downgraded.error == POLICY_EMPTY_ERROR  # the policy did its part
+    state = state_for_capture_miss(downgraded)
+    assert state.kind is ErrorKind.NOTHING_SELECTED
+    assert state.message == "Nothing is selected."
 
 
 @pytest.mark.parametrize(

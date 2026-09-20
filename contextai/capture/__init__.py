@@ -10,9 +10,20 @@ from .client import (
     UsageError,
 )
 from .gate import SelectionGate
-from .model import Bounds, BoundsSource, CaptureResult, TierAttempt
+from .model import (
+    NO_SELECTION_ERROR,
+    NOTHING_SELECTED_ERRORS,
+    POLICY_EMPTY_ERROR,
+    Bounds,
+    BoundsSource,
+    CaptureResult,
+    TierAttempt,
+)
 
 __all__ = [
+    "NO_SELECTION_ERROR",
+    "NOTHING_SELECTED_ERRORS",
+    "POLICY_EMPTY_ERROR",
     "AccessibilityNotGranted",
     "Bounds",
     "BoundsSource",
