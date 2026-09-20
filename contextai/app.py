@@ -86,7 +86,7 @@ class App:
         app = NSApplication.sharedApplication()
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon, never frontmost
         self.panel = Panel(on_action=self.on_action, on_retry=self.on_retry, on_dismiss=self.on_dismiss)
-        HotkeyMonitor(self.hotkey, self.on_hotkey).start()
+        HotkeyMonitor(self.hotkey, self.on_hotkey, log=self.log).start()
         if self.auto_appear:
             SelectionMonitor(self.on_selection_gesture).start()
         mode = " · auto-appear on" if self.auto_appear else ""
